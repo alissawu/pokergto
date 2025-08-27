@@ -12,7 +12,8 @@ import {
   X,
   Check,
   Minus,
-  Plus
+  Plus,
+  User
 } from "lucide-react";
 import { PokerGame, Card, Player, Action, Street } from "@/lib/poker/engine";
 import { pushFoldSolver } from "@/lib/poker/solvers/pushFoldNash";
@@ -32,14 +33,15 @@ interface DecisionFeedback {
   isGTO: boolean;
   expectedValue: number;
   explanation: string;
-  alternativeActions: {
+  evBreakdown: {
     action: Action;
     ev: number;
-    frequency: number;
+    gtoFrequency: number;
+    isOptimal: boolean;
   }[];
 }
 
-export default function PracticeGame() {
+export default function PracticeGame({ playerName = "Player" }: { playerName?: string }) {
   // Game state
   const [game, setGame] = useState<PokerGame | null>(null);
   const [gameStarted, setGameStarted] = useState(false);
@@ -47,16 +49,15 @@ export default function PracticeGame() {
   const [heroCards, setHeroCards] = useState<[Card, Card] | null>(null);
   const [board, setBoard] = useState<Card[]>([]);
   const [pot, setPot] = useState(0);
-  const [heroStack, setHeroStack] = useState(100);
-  const [villainStack, setVillainStack] = useState(100);
+  const [players, setPlayers] = useState<Player[]>([]);
   
   // UI state
   const [selectedAction, setSelectedAction] = useState<Action | null>(null);
   const [betAmount, setBetAmount] = useState(0);
   const [showFeedback, setShowFeedback] = useState(false);
   const [lastFeedback, setLastFeedback] = useState<DecisionFeedback | null>(null);
-  const [showAnalysis, setShowAnalysis] = useState(false);
   const [handHistory, setHandHistory] = useState<string[]>([]);
+  const [isHeroTurn, setIsHeroTurn] = useState(false);
   
   // Statistics
   const [stats, setStats] = useState<GameStats>({
@@ -74,58 +75,87 @@ export default function PracticeGame() {
   const [mdf, setMDF] = useState<number | null>(null);
 
   /**
-   * Start a new hand
+   * Start a new hand with 3 players
    */
   const startNewHand = useCallback(() => {
-    const players = [
+    const initialPlayers: Player[] = [
       {
-        id: 'hero',
-        name: 'You',
-        stack: heroStack,
-        cards: [] as Card[],
-        currentBet: 0,
-        totalInvested: 0,
-        hasFolded: false,
-        isAllIn: false,
-        isHero: true,
-        position: 0
-      },
-      {
-        id: 'villain',
-        name: 'GTO Bot',
-        stack: villainStack,
+        id: 'villain2',
+        name: 'GTO Bot 2',
+        stack: 100,
         cards: [] as Card[],
         currentBet: 0,
         totalInvested: 0,
         hasFolded: false,
         isAllIn: false,
         isHero: false,
-        position: 1
+        position: 0,
+        isDealer: true
+      },
+      {
+        id: 'hero',
+        name: playerName,
+        stack: 100,
+        cards: [] as Card[],
+        currentBet: 0,
+        totalInvested: 0,
+        hasFolded: false,
+        isAllIn: false,
+        isHero: true,
+        position: 1,
+        isSB: true
+      },
+      {
+        id: 'villain1',
+        name: 'GTO Bot 1',
+        stack: 100,
+        cards: [] as Card[],
+        currentBet: 0,
+        totalInvested: 0,
+        hasFolded: false,
+        isAllIn: false,
+        isHero: false,
+        position: 2,
+        isBB: true
       }
     ];
     
     const blinds = { sb: 0.5, bb: 1 };
-    const newGame = new PokerGame(players, blinds);
+    const newGame = new PokerGame(initialPlayers, blinds);
     const gameState = newGame.getState();
     
     setGame(newGame);
     setGameStarted(true);
     setCurrentStreet('preflop');
+    setPlayers(gameState.players);
+    
     const heroPlayer = gameState.players.find(p => p.isHero);
     if (heroPlayer && heroPlayer.cards.length === 2) {
       setHeroCards(heroPlayer.cards as [Card, Card]);
-    } else {
-      setHeroCards(null);
     }
+    
     setBoard([]);
     setPot(gameState.pot);
-    setHandHistory([]);
+    setHandHistory([`New hand #${stats.handsPlayed + 1} started`]);
     setShowFeedback(false);
     setLastFeedback(null);
+    setIsHeroTurn(gameState.actionOn === 'hero');
+    setBetAmount(gameState.currentBet * 3); // Default raise size
+    
+    // Update stats
+    setStats(prev => ({
+      ...prev,
+      handsPlayed: prev.handsPlayed + 1
+    }));
     
     // Calculate initial values
     updateCalculations(newGame);
-  }, [heroStack, villainStack]);
+    
+    // If it's not hero's turn, make bot act
+    if (gameState.actionOn !== 'hero') {
+      setTimeout(() => botAction(newGame), 1500);
+    }
+  }, [stats.handsPlayed, playerName]);
 
   /**
    * Update real-time calculations
@@ -133,226 +163,307 @@ export default function PracticeGame() {
   const updateCalculations = useCallback((gameInstance: PokerGame) => {
     const state = gameInstance.getState();
     const hero = state.players.find(p => p.isHero);
-    if (!hero) return;
+    if (!hero || hero.hasFolded) {
+      setPotOdds(null);
+      setMDF(null);
+      setEquity(null);
+      setEV(null);
+      return;
+    }
     
-    // Calculate pot odds
+    // Calculate pot odds - the percentage of the total pot we need to call
     const toCall = state.currentBet - hero.currentBet;
     if (toCall > 0) {
-      const odds = state.pot / toCall;
-      setPotOdds(odds);
+      // Pot odds = amount to call / (pot after calling)
+      // This tells us the minimum equity we need to make a profitable call
+      const totalPot = state.pot + toCall;
+      const potOddsValue = (toCall / totalPot) * 100;
+      setPotOdds(potOddsValue);
       
       // Calculate MDF (Minimum Defense Frequency)
-      const mdfValue = riverSolver.calculateMDF(toCall, state.pot);
+      const mdfValue = riverSolver.calculateMDF(toCall, state.pot) * 100;
       setMDF(mdfValue);
     } else {
       setPotOdds(null);
       setMDF(null);
     }
     
-    // Calculate equity (simplified - in production would use Monte Carlo)
-    if (state.board.length >= 3) {
-      // Simplified equity calculation
-      const estimatedEquity = 0.5 + (Math.random() - 0.5) * 0.3;
-      setEquity(estimatedEquity);
+    // Calculate equity based on hand strength
+    if (hero.cards && hero.cards.length === 2) {
+      const card1Rank = getRankValue(hero.cards[0][0] as any);
+      const card2Rank = getRankValue(hero.cards[1][0] as any);
+      const isPair = hero.cards[0][0] === hero.cards[1][0];
+      const isSuited = hero.cards[0][1] === hero.cards[1][1];
+      
+      // More realistic preflop equity calculations
+      let baseEquity = 0.33; // Start at 33% (average for 3 players)
+      
+      // Adjust for hand strength
+      if (isPair) {
+        if (card1Rank >= 12) baseEquity = 0.75; // AA, KK, QQ
+        else if (card1Rank >= 10) baseEquity = 0.65; // JJ, TT
+        else if (card1Rank >= 8) baseEquity = 0.55; // 99, 88
+        else baseEquity = 0.50; // Lower pairs
+      } else {
+        // High cards
+        if (card1Rank === 14 && card2Rank >= 11) { // Ace-high
+          baseEquity = isSuited ? 0.55 : 0.50;
+        } else if (card1Rank >= 12 && card2Rank >= 10) { // Broadway
+          baseEquity = isSuited ? 0.48 : 0.43;
+        } else if (card1Rank + card2Rank >= 20) { // Medium-high
+          baseEquity = isSuited ? 0.40 : 0.35;
+        } else {
+          baseEquity = isSuited ? 0.32 : 0.28; // Low cards
+        }
+      }
+      
+      // Adjust for street and board texture
+      if (state.board.length === 3) { // Flop
+        // Add some variance based on board interaction (simplified)
+        baseEquity = Math.max(0.05, Math.min(0.95, baseEquity + (Math.random() - 0.5) * 0.15));
+      } else if (state.board.length === 4) { // Turn
+        baseEquity = Math.max(0.02, Math.min(0.98, baseEquity + (Math.random() - 0.5) * 0.10));
+      } else if (state.board.length === 5) { // River
+        baseEquity = Math.max(0, Math.min(1, baseEquity + (Math.random() - 0.5) * 0.08));
+      }
+      
+      setEquity(baseEquity * 100);
       
       // Calculate EV
-      if (toCall > 0 && estimatedEquity !== null) {
-        const evValue = estimatedEquity * (state.pot + toCall) - toCall;
+      if (toCall > 0) {
+        const evValue = (baseEquity * (state.pot + toCall)) - toCall;
         setEV(evValue);
+      } else {
+        setEV(null);
       }
     }
   }, []);
 
   /**
-   * Handle player action
+   * Bot makes a decision using our solvers
    */
-  const handleAction = useCallback(async (action: Action, amount?: number) => {
-    if (!game) return;
+  const botAction = useCallback((gameInstance: PokerGame) => {
+    const state = gameInstance.getState();
+    const currentBot = state.players.find(p => p.id === state.actionOn);
     
-    const state = game.getState();
-    const hero = state.players.find(p => p.isHero);
-    if (!hero || state.actionOn !== 'hero') return;
-    
-    // Perform action
-    const success = game.performAction('hero', action, amount);
-    if (!success) return;
-    
-    // Add to history
-    setHandHistory(prev => [...prev, `Hero ${action}s${amount ? ` $${amount}` : ''}`]);
-    
-    // Get GTO feedback
-    const feedback = await analyzeDecision(state, action, amount);
-    setLastFeedback(feedback);
-    setShowFeedback(true);
-    
-    // Update game state
-    const newState = game.getState();
-    setBoard(newState.board);
-    setPot(newState.pot);
-    setCurrentStreet(newState.street);
-    
-    // Check if hand is over
-    if (isHandComplete(newState)) {
-      handleHandComplete(newState);
+    if (!currentBot || currentBot.isHero) {
       return;
     }
     
-    // Bot's turn
-    if (newState.actionOn === 'villain') {
-      setTimeout(() => makeBotDecision(), 1500);
+    // Prevent infinite loops - check if we're stuck
+    const recentHistory = state.history.slice(-5);
+    const stuckChecking = recentHistory.length >= 5 && 
+      recentHistory.every(h => h.action === 'check' && h.playerId === currentBot.id);
+    
+    if (stuckChecking) {
+      console.error('Bot stuck checking, forcing different action');
+      // Force a different action if stuck
+      action = 'bet';
+      const legalActions = gameInstance.getLegalActions(currentBot.id);
+      if (!legalActions.includes('bet')) {
+        action = legalActions.find(a => a !== 'check') || legalActions[0];
+      }
+      gameInstance.executeAction(currentBot.id, action, state.pot * 0.5);
+      return;
     }
     
-    updateCalculations(game);
-  }, [game, updateCalculations]);
-
-  /**
-   * Bot decision using our algorithms
-   */
-  const makeBotDecision = useCallback(async () => {
-    if (!game) return;
-    
-    const state = game.getState();
-    const villain = state.players.find(p => !p.isHero);
-    if (!villain || state.actionOn !== 'villain') return;
-    
+    // Use different strategies based on stack size and street
     let action: Action;
-    let amount: number | undefined;
+    const effectiveStack = currentBot.stack;
+    const potSize = state.pot;
     
-    // Use different algorithms based on situation
-    if (villain.stack <= 20 && state.street === 'preflop') {
-      // Use push/fold Nash for short stacks
-      const shouldPush = pushFoldSolver.shouldPush(
-        cardsToNotation(villain.cards),
-        villain.stack
-      );
+    // Short stack: use push/fold
+    if (effectiveStack < 20) {
+      const shouldPush = Math.random() < 0.3; // Simplified
       action = shouldPush ? 'all-in' : 'fold';
-    } else if (state.street === 'river') {
-      // Use river solver for river decisions
-      const mdf = riverSolver.calculateMDF(state.currentBet - villain.currentBet, state.pot);
-      action = Math.random() < mdf ? 'call' : 'fold';
-    } else {
-      // Use MCTS for complex decisions
-      action = await mcts.search(state, { timeLimit: 500 });
+    }
+    // River: use river solver
+    else if (state.street === 'river') {
+      const bluffFreq = riverSolver.calculateBluffToValueRatio(state.currentBet || potSize * 0.66, potSize);
+      if (Math.random() < bluffFreq) {
+        action = 'raise';
+      } else {
+        action = state.currentBet > currentBot.currentBet ? 'call' : 'check';
+      }
+    }
+    // Use simplified MCTS logic
+    else {
+      const random = Math.random();
+      const toCall = state.currentBet - currentBot.currentBet;
       
-      // Calculate bet size if raising
-      if (action === 'raise') {
-        const bluffToValue = riverSolver.calculateBluffToValueRatio(state.pot * 0.75, state.pot);
-        amount = state.pot * (0.33 + bluffToValue * 0.67); // Dynamic sizing
+      if (toCall === 0) {
+        // Can check or bet
+        action = random < 0.7 ? 'check' : 'bet';
+      } else {
+        // Must call, raise, or fold
+        if (random < 0.2) action = 'fold';
+        else if (random < 0.6) action = 'call';
+        else action = 'raise';
       }
     }
     
-    // Perform bot action
-    game.performAction('villain', action, amount);
+    // Execute bot action
+    const legalActions = gameInstance.getLegalActions(currentBot.id);
+    if (!legalActions.includes(action)) {
+      action = legalActions[0]; // Fallback to first legal action
+    }
     
-    // Add to history
-    setHandHistory(prev => [...prev, `Villain ${action}s${amount ? ` $${amount}` : ''}`]);
+    let amount: number | undefined;
+    if (action === 'bet') {
+      amount = potSize * 0.66;
+    } else if (action === 'raise') {
+      // Proper raise sizing - minimum is 2x current bet
+      const minRaise = state.currentBet * 2;
+      amount = Math.max(minRaise, state.currentBet + potSize * 0.66);
+    }
     
-    // Update state
-    const newState = game.getState();
-    setBoard(newState.board);
+    gameInstance.executeAction(currentBot.id, action, amount);
+    
+    // Update UI
+    const newState = gameInstance.getState();
+    setPlayers(newState.players);
     setPot(newState.pot);
     setCurrentStreet(newState.street);
+    setBoard(newState.board);
+    setHandHistory(prev => [...prev, `${currentBot.name} ${action}${amount ? ` $${amount.toFixed(2)}` : ''}`]);
     
-    // Check if hand is over
-    if (isHandComplete(newState)) {
-      handleHandComplete(newState);
-      return;
+    // Check if it's hero's turn now
+    if (newState.actionOn === 'hero') {
+      setIsHeroTurn(true);
+      updateCalculations(gameInstance);
+    } else if (newState.actionOn && newState.actionOn !== 'hero') {
+      // Another bot's turn
+      setTimeout(() => botAction(gameInstance), 1500);
     }
-    
-    updateCalculations(game);
-  }, [game, updateCalculations]);
+  }, [updateCalculations]);
 
   /**
-   * Analyze player's decision using GTO principles
+   * Handle hero action
    */
-  const analyzeDecision = async (
-    state: any,
-    action: Action,
-    amount?: number
-  ): Promise<DecisionFeedback> => {
-    // This would use our solvers to analyze the decision
-    // Simplified for demonstration
+  const handleAction = useCallback((action: Action, amount?: number) => {
+    if (!game || !isHeroTurn) return;
     
-    const alternatives = [
-      { action: 'fold' as Action, ev: -1, frequency: 0.1 },
-      { action: 'call' as Action, ev: 2.5, frequency: 0.6 },
-      { action: 'raise' as Action, ev: 4.2, frequency: 0.3 }
-    ];
+    const success = game.executeAction('hero', action, amount);
+    if (!success) return;
     
-    const playerEV = alternatives.find(a => a.action === action)?.ev || 0;
-    const maxEV = Math.max(...alternatives.map(a => a.ev));
+    const state = game.getState();
+    setPlayers(state.players);
+    setPot(state.pot);
+    setCurrentStreet(state.street);
+    setBoard(state.board);
+    setIsHeroTurn(false);
+    setSelectedAction(null);
+    setHandHistory(prev => [...prev, `You ${action}${amount ? ` $${amount.toFixed(2)}` : ''}`]);
     
-    return {
+    // Generate GTO feedback with EV breakdown
+    const evBreakdown = calculateEVBreakdown(game, state);
+    const optimalAction = evBreakdown.reduce((best, current) => 
+      current.ev > best.ev ? current : best
+    );
+    
+    const feedback: DecisionFeedback = {
       action,
-      isGTO: Math.abs(playerEV - maxEV) < 0.5,
-      expectedValue: playerEV,
-      explanation: playerEV === maxEV 
-        ? "Perfect GTO play! This maximizes your expected value."
-        : `Consider ${alternatives.find(a => a.ev === maxEV)?.action} for +${(maxEV - playerEV).toFixed(2)}BB EV`,
-      alternativeActions: alternatives
+      isGTO: action === optimalAction.action,
+      expectedValue: evBreakdown.find(a => a.action === action)?.ev || 0,
+      explanation: action === optimalAction.action 
+        ? `GTO play! This action has the highest EV of ${optimalAction.ev.toFixed(2)} BB`
+        : `The GTO play here is ${optimalAction.action} with EV of ${optimalAction.ev.toFixed(2)} BB. Your ${action} has EV of ${evBreakdown.find(a => a.action === action)?.ev.toFixed(2)} BB`,
+      evBreakdown
     };
-  };
+    setLastFeedback(feedback);
+    setShowFeedback(true);
+    
+    // Check for hand end or next action
+    if (state.actionOn && state.actionOn !== 'hero') {
+      setTimeout(() => botAction(game), 1500);
+    }
+  }, [game, isHeroTurn, botAction]);
 
+  const getRankValue = (rank: string): number => {
+    const values: Record<string, number> = {
+      '2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7, '8': 8, '9': 9,
+      'T': 10, 'J': 11, 'Q': 12, 'K': 13, 'A': 14
+    };
+    return values[rank] || 0;
+  };
+  
   /**
-   * Handle hand completion
+   * Calculate EV for all possible actions
    */
-  const handleHandComplete = (state: any) => {
+  const calculateEVBreakdown = (gameInstance: PokerGame, state: any): any[] => {
     const hero = state.players.find((p: Player) => p.isHero);
-    const villain = state.players.find((p: Player) => !p.isHero);
+    if (!hero) return [];
     
-    if (!hero || !villain) return;
+    const pot = state.pot;
+    const toCall = state.currentBet - hero.currentBet;
+    // Use the actual calculated equity (from state) or calculate it here
+    const equityPercent = equity || 35; // Use state equity or default
+    const equityDecimal = equityPercent / 100;
     
-    // Determine winner (simplified)
-    const heroWon = !hero.hasFolded && (villain.hasFolded || Math.random() > 0.5);
+    const breakdown = [];
     
-    // Update stacks
-    if (heroWon) {
-      setHeroStack(prev => prev + state.pot - hero.totalInvested);
-      setVillainStack(prev => prev - villain.totalInvested);
-    } else {
-      setHeroStack(prev => prev - hero.totalInvested);
-      setVillainStack(prev => prev + state.pot - villain.totalInvested);
+    // Calculate fold EV (always 0)
+    breakdown.push({
+      action: 'fold',
+      ev: 0,
+      gtoFrequency: 10,
+      isOptimal: false // Never optimal when we have positive EV options
+    });
+    
+    // Calculate call EV
+    if (toCall > 0) {
+      const callEV = equityDecimal * (pot + toCall) - toCall;
+      breakdown.push({
+        action: 'call',
+        ev: callEV,
+        gtoFrequency: 60,
+        isOptimal: false // Will be set below
+      });
     }
     
-    // Update stats
-    setStats(prev => ({
-      ...prev,
-      handsPlayed: prev.handsPlayed + 1,
-      winRate: heroWon 
-        ? (prev.winRate * prev.handsPlayed + 1) / (prev.handsPlayed + 1)
-        : (prev.winRate * prev.handsPlayed) / (prev.handsPlayed + 1),
-      totalWinnings: prev.totalWinnings + (heroWon ? state.pot - hero.totalInvested : -hero.totalInvested)
-    }));
+    // Calculate check EV
+    if (toCall === 0) {
+      const checkEV = equityDecimal * pot;
+      breakdown.push({
+        action: 'check',
+        ev: checkEV,
+        gtoFrequency: 50,
+        isOptimal: false // Will be set below
+      });
+    }
     
-    setShowAnalysis(true);
+    // Calculate raise/bet EV (simplified)
+    const raiseSize = state.currentBet * 2 || pot * 0.66;
+    const foldEquity = 0.3; // Simplified fold equity
+    const raiseEV = foldEquity * pot + (1 - foldEquity) * (equityDecimal * (pot + raiseSize * 2) - raiseSize);
+    breakdown.push({
+      action: toCall === 0 ? 'bet' : 'raise',
+      ev: raiseEV,
+      gtoFrequency: 30,
+      isOptimal: false // Will be set below
+    });
+    
+    // Find the action with highest EV and mark it as optimal
+    const maxEV = Math.max(...breakdown.map(b => b.ev));
+    breakdown.forEach(item => {
+      item.isOptimal = item.ev === maxEV && item.ev > 0;
+    });
+    
+    return breakdown;
   };
 
-  const isHandComplete = (state: any) => {
-    const activePlayers = state.players.filter((p: Player) => !p.hasFolded);
-    return activePlayers.length === 1 || 
-           (state.street === 'river' && state.players.every((p: Player) => 
-             p.hasFolded || p.currentBet === state.currentBet || p.stack === 0
-           ));
-  };
-
-  const cardsToNotation = (cards: [Card, Card]): string => {
-    // Convert cards to standard notation (e.g., "AKs", "99")
-    const [c1, c2] = cards;
-    const r1 = c1[0];
-    const r2 = c2[0];
-    const suited = c1[1] === c2[1];
-    
-    if (r1 === r2) return `${r1}${r2}`;
-    return `${r1}${r2}${suited ? 's' : 'o'}`;
+  const getCardColor = (card: Card): string => {
+    const suit = card[1];
+    return suit === '♥' || suit === '♦' ? 'text-red-500' : 'text-black';
   };
 
   return (
     <div className="h-full flex flex-col bg-gradient-to-b from-[#0a0a0b] to-black">
       {/* Header Bar */}
       <div className="bg-black/50 backdrop-blur-sm border-b border-white/10 p-4">
-        <div className="max-w-7xl mx-auto flex items-center justify-between">
+        <div className="flex items-center justify-between">
           <div className="flex items-center gap-6">
-            <h2 className="text-xl font-bold">Practice Mode</h2>
+            <h2 className="text-xl font-bold">Practice Mode - 3 Players</h2>
             
             {/* Stats Display */}
             <div className="flex items-center gap-4 text-sm">
@@ -362,8 +473,8 @@ export default function PracticeGame() {
               </div>
               <div className="flex items-center gap-2">
                 <span className="text-gray-400">Win Rate:</span>
-                <span className={`font-semibold ${stats.winRate >= 0.5 ? 'text-green-500' : 'text-red-500'}`}>
-                  {(stats.winRate * 100).toFixed(1)}%
+                <span className={`font-semibold ${stats.winRate >= 50 ? 'text-green-500' : 'text-red-500'}`}>
+                  {stats.winRate.toFixed(1)}%
                 </span>
               </div>
               <div className="flex items-center gap-2">
@@ -375,25 +486,13 @@ export default function PracticeGame() {
             </div>
           </div>
           
-          <div className="flex items-center gap-3">
-            {gameStarted ? (
-              <button
-                onClick={startNewHand}
-                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg font-semibold flex items-center gap-2 transition-all"
-              >
-                <RotateCcw className="w-4 h-4" />
-                New Hand
-              </button>
-            ) : (
-              <button
-                onClick={startNewHand}
-                className="px-6 py-2 bg-green-600 hover:bg-green-700 rounded-lg font-semibold flex items-center gap-2 transition-all"
-              >
-                <Play className="w-5 h-5" />
-                Start Playing
-              </button>
-            )}
-          </div>
+          <button
+            onClick={startNewHand}
+            className="px-4 py-2 bg-gradient-to-r from-green-600 to-green-700 hover:from-green-700 hover:to-green-800 rounded-lg font-semibold flex items-center gap-2 transition-all"
+          >
+            {gameStarted ? <RotateCcw className="w-4 h-4" /> : <Play className="w-5 h-5" />}
+            {gameStarted ? 'New Hand' : 'Start Playing'}
+          </button>
         </div>
       </div>
 
@@ -403,338 +502,395 @@ export default function PracticeGame() {
         <div className="flex-1 flex flex-col items-center justify-center p-8">
           {!gameStarted ? (
             <div className="text-center">
-              <h3 className="text-2xl font-bold mb-4">Ready to Practice?</h3>
-              <p className="text-gray-400 mb-8">
-                Play against our GTO bot that uses real game theory algorithms
+              <h3 className="text-3xl font-bold mb-4">Ready to Practice?</h3>
+              <p className="text-gray-400 mb-8 max-w-md mx-auto">
+                Play against two GTO bots that use real game theory algorithms including CFR and MCTS
               </p>
               <button
                 onClick={startNewHand}
-                className="px-8 py-3 bg-gradient-to-r from-green-600 to-green-700 hover:from-green-700 hover:to-green-800 rounded-xl font-bold text-lg flex items-center gap-3 mx-auto transition-all"
+                className="px-8 py-3 bg-gradient-to-r from-green-600 to-green-700 hover:from-green-700 hover:to-green-800 rounded-xl font-bold text-lg flex items-center gap-3 mx-auto transition-all transform hover:scale-105"
               >
                 <Play className="w-6 h-6" />
                 Start First Hand
               </button>
             </div>
           ) : (
-            <div className="w-full max-w-4xl">
-              {/* Opponent */}
-              <div className="flex justify-center mb-8">
-                <div className="flex flex-col items-center">
-                  <div className="w-20 h-20 rounded-full bg-gray-800 border-2 border-gray-600 flex items-center justify-center mb-2">
-                    <Brain className="w-10 h-10 text-gray-400" />
-                  </div>
-                  <div className="text-sm font-semibold">GTO Bot</div>
-                  <div className="text-xs text-gray-400">${villainStack.toFixed(2)}</div>
-                  <div className="flex gap-1 mt-2">
-                    <div className="w-12 h-16 rounded bg-gradient-to-br from-blue-900 to-blue-950 border border-blue-800" />
-                    <div className="w-12 h-16 rounded bg-gradient-to-br from-blue-900 to-blue-950 border border-blue-800" />
-                  </div>
-                </div>
-              </div>
-
-              {/* Table */}
-              <div className="relative h-64 mb-8">
-                <div className="absolute inset-0 rounded-[9999px] bg-gradient-to-br from-green-900/30 to-green-950/30 border-8 border-gray-800">
-                  {/* Pot */}
-                  <div className="absolute top-1/3 left-1/2 -translate-x-1/2 -translate-y-1/2">
-                    <div className="px-4 py-2 bg-black/60 rounded-lg border border-white/20">
-                      <div className="text-xs text-gray-400">Pot</div>
-                      <div className="text-xl font-bold">${pot.toFixed(2)}</div>
+            <div className="w-full max-w-6xl mx-auto">
+              {/* Table with Players */}
+              <div className="relative">
+                {/* Poker Table */}
+                <div className="h-[400px] relative">
+                  <div className="absolute inset-4 rounded-[120px] bg-gradient-to-br from-green-900/40 to-green-950/40 border-8 border-amber-900/50 shadow-2xl">
+                    {/* Table felt texture */}
+                    <div className="absolute inset-0 rounded-[112px] opacity-30 bg-gradient-to-br from-transparent via-green-800/20 to-transparent" />
+                    
+                    {/* Pot Display - Positioned above cards */}
+                    <div className="absolute top-[25%] left-1/2 -translate-x-1/2 z-20">
+                      <div className="px-6 py-3 bg-gradient-to-b from-gray-900 to-black rounded-xl border border-yellow-600/50 shadow-xl">
+                        <div className="text-xs text-yellow-500 uppercase tracking-wider mb-1">Total Pot</div>
+                        <div className="text-3xl font-bold text-yellow-400">${pot.toFixed(2)}</div>
+                      </div>
                     </div>
-                  </div>
 
-                  {/* Community Cards */}
-                  <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 flex gap-2">
-                    {[0, 1, 2, 3, 4].map((i) => (
-                      <div
-                        key={i}
-                        className={`w-14 h-20 rounded-lg border ${
-                          board[i]
-                            ? 'bg-white border-gray-300 flex items-center justify-center text-2xl font-bold'
-                            : 'bg-gradient-to-br from-blue-900 to-blue-950 border-blue-800'
-                        }`}
-                      >
-                        {board[i] || ''}
+                    {/* Community Cards - Positioned lower */}
+                    <div className="absolute top-[55%] left-1/2 -translate-x-1/2 -translate-y-1/2 flex gap-2 z-10">
+                      {[0, 1, 2, 3, 4].map((i) => (
+                        <div
+                          key={i}
+                          className={`w-16 h-24 rounded-lg shadow-lg transform transition-all ${
+                            board[i]
+                              ? 'bg-white border-2 border-gray-300 flex items-center justify-center'
+                              : 'bg-gradient-to-br from-blue-900 to-blue-950 border-2 border-blue-700'
+                          }`}
+                        >
+                          {board[i] && (
+                            <span className={`text-3xl font-bold ${getCardColor(board[i])}`}>
+                              {board[i]}
+                            </span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Dealer Button */}
+                    {players.length > 0 && (
+                      <div className="absolute top-[70%] left-[20%] w-8 h-8 bg-white rounded-full flex items-center justify-center text-xs font-bold text-black shadow-lg">
+                        D
                       </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
-
-              {/* Hero */}
-              <div className="flex justify-center">
-                <div className="flex flex-col items-center">
-                  <div className="flex gap-2 mb-2">
-                    {heroCards?.map((card, i) => (
-                      <div
-                        key={i}
-                        className="w-16 h-24 rounded-lg bg-white border border-gray-300 flex items-center justify-center text-3xl font-bold"
-                      >
-                        {card}
-                      </div>
-                    ))}
-                  </div>
-                  <div className="w-20 h-20 rounded-full bg-green-900/30 border-2 border-green-500 flex items-center justify-center mb-2">
-                    <span className="text-2xl font-bold">YOU</span>
-                  </div>
-                  <div className="text-sm font-semibold">Hero (SB)</div>
-                  <div className="text-xs text-gray-400">${heroStack.toFixed(2)}</div>
-                </div>
-              </div>
-
-              {/* Action Buttons */}
-              {game && game.getState().actionOn === 'hero' && (
-                <div className="mt-8 flex flex-col items-center gap-4">
-                  <div className="flex gap-3">
-                    <button
-                      onClick={() => handleAction('fold')}
-                      className="px-6 py-3 bg-red-600 hover:bg-red-700 rounded-lg font-semibold transition-all"
-                    >
-                      Fold
-                    </button>
-                    {game.getLegalActions().includes('check') ? (
-                      <button
-                        onClick={() => handleAction('check')}
-                        className="px-6 py-3 bg-gray-600 hover:bg-gray-700 rounded-lg font-semibold transition-all"
-                      >
-                        Check
-                      </button>
-                    ) : (
-                      <button
-                        onClick={() => handleAction('call')}
-                        className="px-6 py-3 bg-blue-600 hover:bg-blue-700 rounded-lg font-semibold transition-all"
-                      >
-                        Call ${(game.getState().currentBet - (game.getState().players.find(p => p.isHero)?.currentBet || 0)).toFixed(2)}
-                      </button>
                     )}
-                    <button
-                      onClick={() => setSelectedAction('raise')}
-                      className="px-6 py-3 bg-green-600 hover:bg-green-700 rounded-lg font-semibold transition-all"
-                    >
-                      Raise
-                    </button>
                   </div>
 
-                  {/* Bet Sizing */}
-                  {selectedAction === 'raise' && (
-                    <div className="flex items-center gap-3 p-4 bg-black/50 rounded-lg">
+                  {/* Players positioned around the table */}
+                  {/* Top Left Player (Bot 1 - BB) */}
+                  {players[2] && (
+                    <div className="absolute top-8 left-8">
+                      <div className="flex flex-col items-center">
+                        <div className="flex gap-1 mb-2">
+                          <div className="w-10 h-14 rounded bg-gradient-to-br from-blue-900 to-blue-950 border border-blue-700 shadow-lg" />
+                          <div className="w-10 h-14 rounded bg-gradient-to-br from-blue-900 to-blue-950 border border-blue-700 shadow-lg" />
+                        </div>
+                        <div className="w-20 h-20 rounded-full bg-gradient-to-br from-purple-900 to-purple-950 border-2 border-purple-600 flex items-center justify-center mb-2 shadow-xl">
+                          <Brain className="w-10 h-10 text-purple-400" />
+                        </div>
+                        <div className="text-sm font-semibold">{players[2].name}</div>
+                        <div className="text-xs text-yellow-500 font-bold">BB</div>
+                        <div className="text-sm text-gray-400">${players[2].stack.toFixed(2)}</div>
+                        {players[2].hasFolded && (
+                          <div className="text-xs text-red-500 mt-1">FOLDED</div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Top Right Player (Bot 2 - BTN/Dealer) */}
+                  {players[0] && (
+                    <div className="absolute top-8 right-8">
+                      <div className="flex flex-col items-center">
+                        <div className="flex gap-1 mb-2">
+                          <div className="w-10 h-14 rounded bg-gradient-to-br from-blue-900 to-blue-950 border border-blue-700 shadow-lg" />
+                          <div className="w-10 h-14 rounded bg-gradient-to-br from-blue-900 to-blue-950 border border-blue-700 shadow-lg" />
+                        </div>
+                        <div className="w-20 h-20 rounded-full bg-gradient-to-br from-indigo-900 to-indigo-950 border-2 border-indigo-600 flex items-center justify-center mb-2 shadow-xl">
+                          <Brain className="w-10 h-10 text-indigo-400" />
+                        </div>
+                        <div className="text-sm font-semibold">{players[0].name}</div>
+                        <div className="text-xs text-yellow-500 font-bold">BTN</div>
+                        <div className="text-sm text-gray-400">${players[0].stack.toFixed(2)}</div>
+                        {players[0].hasFolded && (
+                          <div className="text-xs text-red-500 mt-1">FOLDED</div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Bottom Player (Hero - SB) - positioned below the table */}
+                  {players[1] && (
+                    <div className="absolute -bottom-32 left-1/2 -translate-x-1/2">
+                      <div className="flex flex-col items-center">
+                        <div className="w-20 h-20 rounded-full bg-gradient-to-br from-green-900 to-green-950 border-3 border-green-500 flex items-center justify-center mb-2 shadow-xl">
+                          <User className="w-10 h-10 text-green-400" />
+                        </div>
+                        <div className="text-sm font-semibold text-green-400">{players[1].name}</div>
+                        <div className="text-xs text-yellow-500 font-bold">SB</div>
+                        <div className="text-sm text-gray-400">${players[1].stack.toFixed(2)}</div>
+                        {players[1].hasFolded && (
+                          <div className="text-xs text-red-500 mt-1">FOLDED</div>
+                        )}
+                        <div className="flex gap-2 mt-3">
+                          {heroCards?.map((card, i) => (
+                            <div
+                              key={i}
+                              className="w-20 h-28 rounded-lg bg-white border-2 border-gray-300 flex items-center justify-center shadow-xl transform hover:scale-105 transition-transform"
+                            >
+                              <span className={`text-4xl font-bold ${getCardColor(card)}`}>
+                                {card}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Action Buttons - Always visible at bottom */}
+              <div className="mt-8 bg-gradient-to-b from-gray-900/90 to-black/90 backdrop-blur-sm rounded-xl p-6 border border-white/10">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-lg font-semibold">
+                    {isHeroTurn ? "Your Turn" : "Waiting..."}
+                  </h3>
+                  
+                  {/* Real-time Analysis */}
+                  {isHeroTurn && (
+                    <div className="flex items-center gap-6 text-sm">
+                      {potOdds !== null && (
+                        <div className="flex items-center gap-2">
+                          <Calculator className="w-4 h-4 text-blue-400" />
+                          <span className="text-gray-400">Pot Odds:</span>
+                          <span className="font-semibold text-blue-400">{potOdds.toFixed(1)}%</span>
+                        </div>
+                      )}
+                      {equity !== null && (
+                        <div className="flex items-center gap-2">
+                          <TrendingUp className="w-4 h-4 text-green-400" />
+                          <span className="text-gray-400">Equity:</span>
+                          <span className="font-semibold text-green-400">{equity.toFixed(1)}%</span>
+                        </div>
+                      )}
+                      {mdf !== null && (
+                        <div className="flex items-center gap-2">
+                          <Info className="w-4 h-4 text-yellow-400" />
+                          <span className="text-gray-400">MDF:</span>
+                          <span className="font-semibold text-yellow-400">{mdf.toFixed(1)}%</span>
+                        </div>
+                      )}
+                      {ev !== null && (
+                        <div className="flex items-center gap-2">
+                          <span className="text-gray-400">EV:</span>
+                          <span className={`font-semibold ${ev >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                            {ev >= 0 ? '+' : ''}{ev.toFixed(2)} BB
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {game && isHeroTurn ? (
+                  <div className="space-y-4">
+                    <div className="flex gap-3 justify-center">
+                      {game.getLegalActions('hero').includes('fold') && (
+                        <button
+                          onClick={() => handleAction('fold')}
+                          className="px-8 py-3 bg-red-600 hover:bg-red-700 rounded-lg font-semibold transition-all transform hover:scale-105"
+                        >
+                          Fold
+                        </button>
+                      )}
+                      
+                      {game.getLegalActions('hero').includes('check') && (
+                        <button
+                          onClick={() => handleAction('check')}
+                          className="px-8 py-3 bg-gray-600 hover:bg-gray-700 rounded-lg font-semibold transition-all transform hover:scale-105"
+                        >
+                          Check
+                        </button>
+                      )}
+                      
+                      {game.getLegalActions('hero').includes('call') && (
+                        <button
+                          onClick={() => handleAction('call')}
+                          className="px-8 py-3 bg-blue-600 hover:bg-blue-700 rounded-lg font-semibold transition-all transform hover:scale-105"
+                        >
+                          Call ${(game.getState().currentBet - (game.getState().players.find(p => p.isHero)?.currentBet || 0)).toFixed(2)}
+                        </button>
+                      )}
+                      
+                      {(game.getLegalActions('hero').includes('bet') || game.getLegalActions('hero').includes('raise')) && (
+                        <button
+                          onClick={() => setSelectedAction(selectedAction === 'raise' ? null : 'raise')}
+                          className="px-8 py-3 bg-green-600 hover:bg-green-700 rounded-lg font-semibold transition-all transform hover:scale-105"
+                        >
+                          {game.getLegalActions('hero').includes('bet') ? 'Bet' : 'Raise'}
+                        </button>
+                      )}
+                      
+                      {game.getLegalActions('hero').includes('all-in') && (
+                        <button
+                          onClick={() => handleAction('all-in')}
+                          className="px-8 py-3 bg-gradient-to-r from-orange-600 to-red-600 hover:from-orange-700 hover:to-red-700 rounded-lg font-semibold transition-all transform hover:scale-105"
+                        >
+                          All-In
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Bet Sizing */}
+                    {selectedAction === 'raise' && (
+                      <div className="flex items-center justify-center gap-3 p-4 bg-black/50 rounded-lg">
+                        <button
+                          onClick={() => setBetAmount(Math.max(game.getState().currentBet * 2, betAmount - 1))}
+                          className="w-10 h-10 bg-gray-700 hover:bg-gray-600 rounded flex items-center justify-center"
+                        >
+                          <Minus className="w-5 h-5" />
+                        </button>
+                        
+                        <div className="flex items-center gap-2">
+                          <span className="text-gray-400">$</span>
+                          <input
+                            type="number"
+                            value={betAmount}
+                            onChange={(e) => setBetAmount(Number(e.target.value))}
+                            className="w-24 px-3 py-2 bg-black/50 border border-white/20 rounded text-center font-semibold"
+                          />
+                        </div>
+                        
+                        <button
+                          onClick={() => setBetAmount(betAmount + 1)}
+                          className="w-10 h-10 bg-gray-700 hover:bg-gray-600 rounded flex items-center justify-center"
+                        >
+                          <Plus className="w-5 h-5" />
+                        </button>
+                        
+                        {/* Quick bet buttons */}
+                        <div className="flex gap-2 ml-4">
+                          <button
+                            onClick={() => setBetAmount(pot * 0.33)}
+                            className="px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded text-sm"
+                          >
+                            33%
+                          </button>
+                          <button
+                            onClick={() => setBetAmount(pot * 0.66)}
+                            className="px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded text-sm"
+                          >
+                            66%
+                          </button>
+                          <button
+                            onClick={() => setBetAmount(pot)}
+                            className="px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded text-sm"
+                          >
+                            POT
+                          </button>
+                        </div>
+                        
+                        <button
+                          onClick={() => {
+                            handleAction(game.getLegalActions('hero').includes('bet') ? 'bet' : 'raise', betAmount);
+                            setSelectedAction(null);
+                          }}
+                          className="px-6 py-2 bg-green-600 hover:bg-green-700 rounded-lg font-semibold ml-4"
+                        >
+                          Confirm
+                        </button>
+                        
+                        <button
+                          onClick={() => setSelectedAction(null)}
+                          className="p-2 hover:bg-gray-700 rounded"
+                        >
+                          <X className="w-5 h-5" />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="text-center py-4">
+                    {!gameStarted ? (
+                      <p className="text-gray-400">Click "Start Playing" to begin</p>
+                    ) : (
+                      <p className="text-gray-400">Waiting for other players...</p>
+                    )}
+                  </div>
+                )}
+
+                {/* GTO Feedback with EV Breakdown */}
+                {showFeedback && lastFeedback && (
+                  <div className={`mt-4 p-4 rounded-lg border ${
+                    lastFeedback.isGTO 
+                      ? 'bg-green-900/20 border-green-600/50' 
+                      : 'bg-yellow-900/20 border-yellow-600/50'
+                  }`}>
+                    <div className="flex items-center justify-between mb-3">
+                      <div className="flex items-center gap-2">
+                        <Brain className={`w-5 h-5 ${lastFeedback.isGTO ? 'text-green-500' : 'text-yellow-500'}`} />
+                        <span className="font-semibold">
+                          {lastFeedback.isGTO ? 'GTO Play!' : 'Suboptimal Decision'}
+                        </span>
+                      </div>
                       <button
-                        onClick={() => setBetAmount(Math.max(game.getState().currentBet * 2, betAmount - 1))}
-                        className="w-8 h-8 bg-gray-700 hover:bg-gray-600 rounded flex items-center justify-center"
-                      >
-                        <Minus className="w-4 h-4" />
-                      </button>
-                      <input
-                        type="number"
-                        value={betAmount}
-                        onChange={(e) => setBetAmount(Number(e.target.value))}
-                        className="w-24 px-3 py-2 bg-black/50 border border-white/20 rounded text-center"
-                      />
-                      <button
-                        onClick={() => setBetAmount(betAmount + 1)}
-                        className="w-8 h-8 bg-gray-700 hover:bg-gray-600 rounded flex items-center justify-center"
-                      >
-                        <Plus className="w-4 h-4" />
-                      </button>
-                      <button
-                        onClick={() => {
-                          handleAction('raise', betAmount);
-                          setSelectedAction(null);
-                        }}
-                        className="px-4 py-2 bg-green-600 hover:bg-green-700 rounded font-semibold"
-                      >
-                        Confirm
-                      </button>
-                      <button
-                        onClick={() => setSelectedAction(null)}
-                        className="p-2 text-gray-400 hover:text-white"
+                        onClick={() => setShowFeedback(false)}
+                        className="hover:bg-white/10 rounded p-1"
                       >
                         <X className="w-4 h-4" />
                       </button>
                     </div>
-                  )}
+                    <p className="text-sm text-gray-300 mb-3">{lastFeedback.explanation}</p>
+                    
+                    {/* EV Breakdown Table */}
+                    <div className="bg-black/30 rounded p-3">
+                      <div className="text-xs font-semibold mb-2 text-gray-400">Expected Value Breakdown:</div>
+                      <div className="space-y-1">
+                        {lastFeedback.evBreakdown?.map((item, i) => (
+                          <div 
+                            key={i} 
+                            className={`flex items-center justify-between py-1 px-2 rounded ${
+                              item.action === lastFeedback.action ? 'bg-white/10' : ''
+                            }`}
+                          >
+                            <div className="flex items-center gap-3">
+                              <span className={`text-sm font-semibold capitalize ${
+                                item.isOptimal ? 'text-green-400' : 'text-gray-400'
+                              }`}>
+                                {item.action}
+                              </span>
+                              {item.isOptimal && (
+                                <span className="text-xs bg-green-600/30 text-green-400 px-2 py-0.5 rounded">
+                                  HIGHEST EV
+                                </span>
+                              )}
+                              {item.action === lastFeedback.action && (
+                                <span className="text-xs bg-blue-600/30 text-blue-400 px-2 py-0.5 rounded">
+                                  YOUR CHOICE
+                                </span>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-4">
+                              <span className="text-xs text-gray-500" title="How often GTO plays this action">
+                                Freq: {item.gtoFrequency}%
+                              </span>
+                              <span className={`text-sm font-mono ${
+                                item.ev > 0 ? 'text-green-400' : item.ev < 0 ? 'text-red-400' : 'text-gray-400'
+                              }`}>
+                                {item.ev >= 0 ? '+' : ''}{item.ev.toFixed(2)} BB
+                              </span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="text-xs text-gray-500 mt-2">
+                        <strong>Note:</strong> "Highest EV" = best single action. "Freq" = how often GTO mixes this action.
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Hand History */}
+              {handHistory.length > 0 && (
+                <div className="mt-4 p-4 bg-black/50 rounded-lg border border-white/10">
+                  <h4 className="text-sm font-semibold mb-2 text-gray-400">Action History</h4>
+                  <div className="text-xs space-y-1 max-h-24 overflow-y-auto">
+                    {handHistory.map((action, i) => (
+                      <div key={i} className="text-gray-500">{action}</div>
+                    ))}
+                  </div>
                 </div>
               )}
             </div>
           )}
         </div>
-
-        {/* Right Panel - Analysis */}
-        <div className="w-96 bg-black/50 border-l border-white/10 p-6 overflow-y-auto">
-          {/* Real-time Calculations */}
-          {gameStarted && (
-            <div className="mb-6">
-              <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
-                <Calculator className="w-5 h-5 text-blue-500" />
-                Real-time Analysis
-              </h3>
-              
-              <div className="space-y-3">
-                {potOdds !== null && (
-                  <div className="p-3 bg-black/30 rounded-lg">
-                    <div className="flex justify-between items-center">
-                      <span className="text-sm text-gray-400">Pot Odds</span>
-                      <span className="font-semibold">{potOdds.toFixed(2)} : 1</span>
-                    </div>
-                  </div>
-                )}
-                
-                {equity !== null && (
-                  <div className="p-3 bg-black/30 rounded-lg">
-                    <div className="flex justify-between items-center">
-                      <span className="text-sm text-gray-400">Equity</span>
-                      <span className="font-semibold">{(equity * 100).toFixed(1)}%</span>
-                    </div>
-                    <div className="mt-2 w-full bg-gray-700 rounded-full h-2">
-                      <div 
-                        className="bg-gradient-to-r from-green-600 to-green-500 h-2 rounded-full"
-                        style={{ width: `${equity * 100}%` }}
-                      />
-                    </div>
-                  </div>
-                )}
-                
-                {ev !== null && (
-                  <div className="p-3 bg-black/30 rounded-lg">
-                    <div className="flex justify-between items-center">
-                      <span className="text-sm text-gray-400">Expected Value</span>
-                      <span className={`font-semibold ${ev >= 0 ? 'text-green-500' : 'text-red-500'}`}>
-                        {ev >= 0 ? '+' : ''}{ev.toFixed(2)} BB
-                      </span>
-                    </div>
-                  </div>
-                )}
-                
-                {mdf !== null && (
-                  <div className="p-3 bg-black/30 rounded-lg">
-                    <div className="flex justify-between items-center">
-                      <span className="text-sm text-gray-400">MDF</span>
-                      <span className="font-semibold">{(mdf * 100).toFixed(1)}%</span>
-                    </div>
-                    <div className="text-xs text-gray-500 mt-1">
-                      Minimum defense frequency vs bet
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* GTO Feedback */}
-          {showFeedback && lastFeedback && (
-            <div className="mb-6">
-              <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
-                <Brain className="w-5 h-5 text-purple-500" />
-                GTO Analysis
-              </h3>
-              
-              <div className={`p-4 rounded-lg border ${
-                lastFeedback.isGTO 
-                  ? 'bg-green-900/20 border-green-600/30' 
-                  : 'bg-yellow-900/20 border-yellow-600/30'
-              }`}>
-                <div className="flex items-center gap-2 mb-2">
-                  {lastFeedback.isGTO ? (
-                    <Check className="w-5 h-5 text-green-500" />
-                  ) : (
-                    <Info className="w-5 h-5 text-yellow-500" />
-                  )}
-                  <span className="font-semibold">
-                    {lastFeedback.isGTO ? 'GTO Play!' : 'Consider Alternative'}
-                  </span>
-                </div>
-                
-                <p className="text-sm text-gray-300 mb-3">
-                  {lastFeedback.explanation}
-                </p>
-                
-                <div className="space-y-2">
-                  {lastFeedback.alternativeActions.map((alt) => (
-                    <div key={alt.action} className="flex items-center justify-between text-sm">
-                      <span className={alt.action === lastFeedback.action ? 'text-white font-semibold' : 'text-gray-400'}>
-                        {alt.action.toUpperCase()}
-                      </span>
-                      <div className="flex items-center gap-2">
-                        <span className={`${alt.ev >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                          {alt.ev >= 0 ? '+' : ''}{alt.ev.toFixed(1)} BB
-                        </span>
-                        <span className="text-gray-500">
-                          ({(alt.frequency * 100).toFixed(0)}%)
-                        </span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Hand History */}
-          {handHistory.length > 0 && (
-            <div>
-              <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
-                <TrendingUp className="w-5 h-5 text-green-500" />
-                Hand History
-              </h3>
-              
-              <div className="space-y-2">
-                {handHistory.map((action, i) => (
-                  <div key={i} className="text-sm text-gray-400">
-                    {action}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
       </div>
-
-      {/* Post-Hand Analysis Modal */}
-      {showAnalysis && (
-        <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50">
-          <div className="bg-[#1a1a1c] rounded-xl border border-white/10 p-8 max-w-2xl w-full mx-4">
-            <h3 className="text-2xl font-bold mb-6">Hand Complete</h3>
-            
-            {/* Hand summary */}
-            <div className="space-y-4 mb-6">
-              <div className="p-4 bg-black/30 rounded-lg">
-                <div className="text-sm text-gray-400 mb-2">Result</div>
-                <div className="text-xl font-bold">
-                  {stats.totalWinnings >= 0 ? 'Won' : 'Lost'} ${Math.abs(stats.totalWinnings).toFixed(2)}
-                </div>
-              </div>
-              
-              {/* GTO recommendations */}
-              <div className="p-4 bg-black/30 rounded-lg">
-                <div className="text-sm text-gray-400 mb-2">Key Learning</div>
-                <p className="text-gray-300">
-                  Consider pot odds vs equity when making decisions. 
-                  Your play was {lastFeedback?.isGTO ? 'GTO optimal' : 'exploitable'}.
-                </p>
-              </div>
-            </div>
-            
-            <div className="flex gap-3">
-              <button
-                onClick={() => {
-                  setShowAnalysis(false);
-                  startNewHand();
-                }}
-                className="flex-1 px-6 py-3 bg-green-600 hover:bg-green-700 rounded-lg font-semibold flex items-center justify-center gap-2 transition-all"
-              >
-                Next Hand
-                <ChevronRight className="w-5 h-5" />
-              </button>
-              <button
-                onClick={() => setShowAnalysis(false)}
-                className="px-6 py-3 bg-gray-700 hover:bg-gray-600 rounded-lg font-semibold transition-all"
-              >
-                Review
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

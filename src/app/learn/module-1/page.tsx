@@ -59,27 +59,25 @@ export default function Module1() {
             <div className="mb-8 pt-6">
               <Link
                 href="/"
-                className="inline-flex items-center gap-2 text-gray-400 hover:text-white transition-colors mb-4"
+                className="inline-flex items-center gap-2 text-gray-500 hover:text-gray-300 transition-colors mb-6 text-sm"
               >
-                <ArrowLeft className="w-4 h-4" />
-                Back to Home
+                <ArrowLeft className="w-3 h-3" />
+                Back
               </Link>
 
-              <div className="flex items-center gap-4 mb-2">
-                <div className="w-12 h-12 bg-gradient-to-br from-green-600 to-green-700 rounded-xl flex items-center justify-center text-2xl">
-                  {module1.icon}
-                </div>
-                <div>
-                  <h1 className="text-4xl font-bold">{module1.title}</h1>
-                  <p className="text-gray-400">{module1.description}</p>
-                </div>
+              <div className="mb-2">
+                <h1 className="text-2xl font-light mb-2">
+                  <span className="text-gray-500 mr-2">{module1.icon}</span>
+                  Module 1: <span className="font-normal">Foundations</span>
+                </h1>
+                <p className="text-gray-500 text-sm">{module1.description}</p>
               </div>
             </div>
 
             <div className="grid lg:grid-cols-4 gap-8">
               {/* Lesson Sidebar */}
               <div className="lg:col-span-1">
-                <div className="bg-[#1a1a1c]/50 backdrop-blur-sm rounded-xl border border-white/5 p-4">
+                <div className="bg-black/20 backdrop-blur-sm rounded border border-white/5 p-4">
                   <h3 className="font-semibold mb-4 text-sm uppercase text-gray-400 tracking-wider">
                     Lessons
                   </h3>
@@ -91,10 +89,10 @@ export default function Module1() {
                           setCurrentLessonIndex(index);
                           setShowPractice(false);
                         }}
-                        className={`w-full text-left p-3 rounded-lg transition-all duration-200 ${
+                        className={`w-full text-left p-3 rounded transition-all duration-200 ${
                           currentLessonIndex === index
-                            ? "bg-gradient-to-r from-green-600/20 to-green-700/20 border border-green-600/50"
-                            : "hover:bg-white/5 border border-transparent"
+                            ? "bg-white/5 border-l-2 border-white"
+                            : "hover:bg-white/5 border-l-2 border-transparent"
                         }`}
                       >
                         <div className="flex items-start gap-3">
@@ -145,48 +143,36 @@ export default function Module1() {
 
               {/* Lesson Content */}
               <div className="lg:col-span-3">
-                <div className="bg-[#1a1a1c]/50 backdrop-blur-sm rounded-xl border border-white/5 p-8">
+                <div className="bg-black/20 backdrop-blur-sm rounded border border-white/5 p-8">
                   {!showPractice ? (
                     <>
                       {/* Learning Objectives */}
-                      <div className="mb-8 p-6 bg-gradient-to-r from-blue-600/10 to-blue-700/10 rounded-xl border border-blue-600/20">
-                        <div className="flex items-center gap-2 mb-3">
-                          <Target className="w-5 h-5 text-blue-500" />
-                          <span className="text-sm font-semibold text-blue-500 uppercase tracking-wider">
-                            Learning Objectives
-                          </span>
-                        </div>
-                        <ul className="space-y-2">
+                      <div className="mb-8">
+                        <h3 className="text-xs uppercase tracking-widest text-gray-500 mb-3 font-light">
+                          Objectives
+                        </h3>
+                        <ul className="space-y-1.5">
                           {currentLesson.objectives.map((objective, i) => (
                             <li key={i} className="flex items-start gap-2">
-                              <span className="text-blue-400 mt-1">•</span>
-                              <span className="text-gray-300">{objective}</span>
+                              <span className="text-gray-600 mt-0.5 text-xs">→</span>
+                              <span className="text-gray-400 text-sm">{objective}</span>
                             </li>
                           ))}
                         </ul>
                       </div>
 
                       {/* Hook */}
-                      <div className="mb-8 p-6 bg-gradient-to-r from-green-600/10 to-green-700/10 rounded-xl border border-green-600/20">
-                        <div className="flex items-center gap-2 mb-3">
-                          <Brain className="w-5 h-5 text-green-500" />
-                          <span className="text-sm font-semibold text-green-500 uppercase tracking-wider">
-                            Hook
-                          </span>
-                        </div>
-                        <p className="text-lg font-medium mb-3">
-                          {currentLesson.hook.question}
+                      <div className="mb-10 border-l-2 border-gray-800 pl-6">
+                        <p className="text-base font-light mb-3 text-gray-300 italic">
+                          "{currentLesson.hook.question}"
                         </p>
                         {currentLesson.hook.scenario && (
-                          <p className="text-gray-400 mb-3">
+                          <p className="text-sm text-gray-500 mb-3">
                             {currentLesson.hook.scenario}
                           </p>
                         )}
-                        <div className="mt-4 p-4 bg-black/30 rounded-lg">
-                          <div className="text-sm text-green-400 mb-1">
-                            The Answer:
-                          </div>
-                          <p className="text-gray-300">
+                        <div className="mt-4">
+                          <p className="text-sm text-gray-400 leading-relaxed">
                             {currentLesson.hook.reveal}
                           </p>
                         </div>
@@ -194,8 +180,7 @@ export default function Module1() {
 
                       {/* Theory */}
                       <div className="mb-8">
-                        <h2 className="text-2xl font-bold mb-4 flex items-center gap-2">
-                          <BookOpen className="w-6 h-6 text-gray-400" />
+                        <h2 className="text-xl font-light mb-6">
                           {currentLesson.title}
                         </h2>
 
@@ -205,16 +190,16 @@ export default function Module1() {
                           </div>
 
                           {/* Examples */}
-                          <div className="space-y-4 mb-6">
+                          <div className="space-y-3 mb-8">
                             {currentLesson.theory.examples.map((example, i) => (
                               <div
                                 key={i}
-                                className="bg-black/30 rounded-lg p-4 border border-white/5"
+                                className="pl-4 border-l border-gray-800"
                               >
-                                <h4 className="font-semibold text-yellow-400 mb-2">
+                                <h4 className="font-medium text-gray-300 text-sm mb-1">
                                   {example.title}
                                 </h4>
-                                <p className="text-gray-300">
+                                <p className="text-gray-500 text-sm">
                                   {example.description}
                                 </p>
                               </div>
@@ -222,10 +207,9 @@ export default function Module1() {
                           </div>
 
                           {/* Key Takeaways */}
-                          <div className="bg-gradient-to-br from-purple-600/10 to-purple-700/10 rounded-xl p-6 border border-purple-600/20">
-                            <h4 className="font-semibold text-purple-400 mb-3 flex items-center gap-2">
-                              <Zap className="w-5 h-5" />
-                              Key Takeaways
+                          <div className="border-t border-gray-800 pt-6">
+                            <h4 className="text-xs uppercase tracking-widest text-gray-500 mb-4 font-light">
+                              Key Points
                             </h4>
                             <ul className="space-y-2">
                               {currentLesson.theory.keyTakeaways.map(
@@ -234,10 +218,10 @@ export default function Module1() {
                                     key={i}
                                     className="flex items-start gap-2"
                                   >
-                                    <span className="text-purple-400 mt-1">
-                                      ✓
+                                    <span className="text-gray-600 mt-0.5 text-xs">
+                                      •
                                     </span>
-                                    <span className="text-gray-300">
+                                    <span className="text-gray-400 text-sm">
                                       {takeaway}
                                     </span>
                                   </li>
@@ -265,9 +249,8 @@ export default function Module1() {
 
                         <button
                           onClick={() => setShowPractice(true)}
-                          className="flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-green-600 to-green-700 hover:from-green-700 hover:to-green-800 text-white rounded-lg font-semibold transition-all transform hover:scale-105"
+                          className="px-6 py-2.5 bg-white text-black hover:bg-gray-100 rounded font-medium text-sm transition-all"
                         >
-                          <Play className="w-5 h-5" />
                           Start Practice
                         </button>
 

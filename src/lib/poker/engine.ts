@@ -74,11 +74,11 @@ export class PokerGame {
       position: i,
       cards: [] as Card[],
       isDealer: i === 0,
-      isSB: i === 1 % players.length,
-      isBB: i === 2 % players.length,
+      isSB: i === (1 % players.length),
+      isBB: i === (2 % players.length),
     }));
     
-    // Post blinds
+    // Post blinds - for 3 players: dealer=0, SB=1, BB=2
     const sbIndex = 1 % players.length;
     const bbIndex = 2 % players.length;
     gamePlayers[sbIndex].currentBet = blinds.sb;
@@ -88,13 +88,17 @@ export class PokerGame {
     gamePlayers[bbIndex].stack -= blinds.bb;
     gamePlayers[bbIndex].totalInvested = blinds.bb;
     
+    // In 3-player game: SB acts first preflop (after blinds)
+    // Order is SB → BB → BTN (BTN gets last action preflop)
+    const firstToAct = players.length === 3 ? gamePlayers[sbIndex].id : gamePlayers[(bbIndex + 1) % players.length].id;
+    
     this.state = {
       players: gamePlayers,
       board: [],
       pot: blinds.sb + blinds.bb,
       currentBet: blinds.bb,
       street: 'preflop',
-      actionOn: gamePlayers[(bbIndex + 1) % players.length].id,
+      actionOn: firstToAct,
       history: [],
       deck
     };
@@ -202,13 +206,32 @@ export class PokerGame {
         break;
         
       case 'bet':
-      case 'raise':
-        const betAmount = amount || this.state.pot * 0.66; // Default 66% pot
-        const actualBet = Math.min(betAmount, player.stack);
+        const betSize = amount || this.state.pot * 0.66;
+        const actualBet = Math.min(betSize, player.stack);
         player.stack -= actualBet;
         player.currentBet += actualBet;
         player.totalInvested += actualBet;
         this.state.pot += actualBet;
+        this.state.currentBet = player.currentBet;
+        if (player.stack === 0) player.isAllIn = true;
+        break;
+        
+      case 'raise':
+        // Minimum raise is 2x current bet or the size of the last raise
+        const minRaise = this.state.currentBet * 2;
+        const targetAmount = amount || Math.max(minRaise, this.state.currentBet + this.state.pot * 0.66);
+        const toAdd = Math.min(targetAmount - player.currentBet, player.stack);
+        
+        // Ensure it's at least a min raise
+        if (player.currentBet + toAdd < minRaise && toAdd < player.stack) {
+          // If can't make min raise, must go all-in or just call
+          return false;
+        }
+        
+        player.stack -= toAdd;
+        player.currentBet += toAdd;
+        player.totalInvested += toAdd;
+        this.state.pot += toAdd;
         this.state.currentBet = player.currentBet;
         if (player.stack === 0) player.isAllIn = true;
         break;
@@ -233,50 +256,133 @@ export class PokerGame {
   private advanceGame(): void {
     const activePlayers = this.state.players.filter(p => !p.hasFolded);
     
-    // Check if hand is over
+    // Check if hand is over - only one player remains
     if (activePlayers.length === 1) {
       this.endHand();
       return;
     }
     
-    // Check if betting round is complete
-    const needsAction = activePlayers.filter(p => 
-      !p.isAllIn && p.currentBet < this.state.currentBet
-    );
+    // Check if all remaining active players have acted this street
+    const activeNonAllIn = activePlayers.filter(p => !p.isAllIn);
     
-    if (needsAction.length === 0) {
-      // Move to next street
-      this.nextStreet();
+    // If everyone is all-in, go to showdown
+    if (activeNonAllIn.length === 0) {
+      // Run out remaining streets
+      while (this.state.street !== 'river' && this.state.board.length < 5) {
+        this.dealNextStreetCards();
+      }
+      this.endHand();
+      return;
+    }
+    
+    // Check if betting round is complete
+    const bettingComplete = activeNonAllIn.every(p => {
+      // Player has matched the current bet
+      if (p.currentBet === this.state.currentBet) {
+        // Special case: BB preflop gets option even if bet is matched
+        if (this.state.street === 'preflop' && p.isBB && !this.hasActedThisStreet(p.id)) {
+          return false;
+        }
+        return true;
+      }
+      return false;
+    });
+    
+    if (bettingComplete) {
+      // If there's been action this street, move to next street
+      if (this.state.history.some(h => h.street === this.state.street)) {
+        this.nextStreet();
+      } else {
+        // No action yet, continue betting round
+        this.nextPlayer();
+      }
     } else {
       // Move to next player
       this.nextPlayer();
     }
   }
   
+  private dealNextStreetCards(): void {
+    switch (this.state.street) {
+      case 'preflop':
+        this.state.street = 'flop';
+        this.state.board.push(
+          this.state.deck.pop()!,
+          this.state.deck.pop()!,
+          this.state.deck.pop()!
+        );
+        break;
+      case 'flop':
+        this.state.street = 'turn';
+        this.state.board.push(this.state.deck.pop()!);
+        break;
+      case 'turn':
+        this.state.street = 'river';
+        this.state.board.push(this.state.deck.pop()!);
+        break;
+    }
+  }
+  
+  private hasActedThisStreet(playerId: string): boolean {
+    // Check if player has acted in current street
+    const streetActions = this.state.history.filter(h => 
+      h.playerId === playerId && h.street === this.state.street
+    );
+    return streetActions.length > 0;
+  }
+  
   private nextPlayer(): void {
     const currentIndex = this.state.players.findIndex(p => p.id === this.state.actionOn);
     let nextIndex = (currentIndex + 1) % this.state.players.length;
+    let attempts = 0;
     
-    // Find next active player
-    while (this.state.players[nextIndex].hasFolded || 
-           this.state.players[nextIndex].isAllIn ||
-           (this.state.players[nextIndex].currentBet === this.state.currentBet && 
-            this.state.currentBet > 0)) {
-      nextIndex = (nextIndex + 1) % this.state.players.length;
+    // Find next active player who needs to act
+    while (attempts < this.state.players.length) {
+      const nextPlayer = this.state.players[nextIndex];
       
-      // Prevent infinite loop
-      if (nextIndex === currentIndex) {
-        this.nextStreet();
+      // Skip if folded or all-in
+      if (nextPlayer.hasFolded || nextPlayer.isAllIn) {
+        nextIndex = (nextIndex + 1) % this.state.players.length;
+        attempts++;
+        continue;
+      }
+      
+      // Check if this player needs to act
+      if (nextPlayer.currentBet < this.state.currentBet) {
+        // Player needs to act (call, raise, or fold)
+        this.state.actionOn = nextPlayer.id;
         return;
       }
+      
+      // Special case: BB preflop option
+      if (this.state.street === 'preflop' && nextPlayer.isBB && 
+          nextPlayer.currentBet === this.state.currentBet && 
+          !this.hasActedThisStreet(nextPlayer.id)) {
+        this.state.actionOn = nextPlayer.id;
+        return;
+      }
+      
+      nextIndex = (nextIndex + 1) % this.state.players.length;
+      attempts++;
     }
     
-    this.state.actionOn = this.state.players[nextIndex].id;
+    // No player needs to act, move to next street
+    this.nextStreet();
   }
   
   private nextStreet(): void {
-    // Reset current bets
-    this.state.players.forEach(p => p.currentBet = 0);
+    const activePlayers = this.state.players.filter(p => !p.hasFolded && !p.isAllIn);
+    
+    // If no one can act, go to showdown
+    if (activePlayers.length === 0) {
+      this.endHand();
+      return;
+    }
+    
+    // Reset current bets for the new street
+    this.state.players.forEach(p => {
+      p.currentBet = 0;
+    });
     this.state.currentBet = 0;
     
     // Deal community cards
@@ -302,12 +408,21 @@ export class PokerGame {
         return;
     }
     
-    // First to act is first active player after dealer
+    // Find first active player to act (postflop: first after button)
     const dealerIndex = this.state.players.findIndex(p => p.isDealer);
     let nextIndex = (dealerIndex + 1) % this.state.players.length;
+    let attempts = 0;
     
-    while (this.state.players[nextIndex].hasFolded || this.state.players[nextIndex].isAllIn) {
+    while ((this.state.players[nextIndex].hasFolded || this.state.players[nextIndex].isAllIn) && 
+           attempts < this.state.players.length) {
       nextIndex = (nextIndex + 1) % this.state.players.length;
+      attempts++;
+    }
+    
+    if (attempts >= this.state.players.length) {
+      // No one can act, go to next street or showdown
+      this.nextStreet();
+      return;
     }
     
     this.state.actionOn = this.state.players[nextIndex].id;
