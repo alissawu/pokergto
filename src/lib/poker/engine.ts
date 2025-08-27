@@ -1,0 +1,349 @@
+/**
+ * Core Poker Game Engine
+ * Types and game logic for Texas Hold'em
+ */
+
+export type Suit = '♠' | '♥' | '♦' | '♣';
+export type Rank = '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' | 'T' | 'J' | 'Q' | 'K' | 'A';
+export type Card = `${Rank}${Suit}`;
+
+export const SUITS: Suit[] = ['♠', '♥', '♦', '♣'];
+export const RANKS: Rank[] = ['2', '3', '4', '5', '6', '7', '8', '9', 'T', 'J', 'Q', 'K', 'A'];
+
+export type Action = 'fold' | 'check' | 'call' | 'raise' | 'bet' | 'all-in';
+export type Street = 'preflop' | 'flop' | 'turn' | 'river';
+
+export interface Player {
+  id: string;
+  name: string;
+  stack: number;
+  cards: [Card, Card] | [];
+  currentBet: number;
+  totalInvested: number;
+  hasFolded: boolean;
+  isAllIn: boolean;
+  isHero: boolean;
+  position: number;
+  isDealer?: boolean;
+  isSB?: boolean;
+  isBB?: boolean;
+}
+
+export interface GameState {
+  players: Player[];
+  board: Card[];
+  pot: number;
+  currentBet: number;
+  street: Street;
+  actionOn: string; // player id
+  history: ActionHistory[];
+  deck: Card[];
+}
+
+export interface ActionHistory {
+  playerId: string;
+  action: Action;
+  amount?: number;
+  street: Street;
+  timestamp: number;
+}
+
+export interface HandRank {
+  rank: number; // 1-9 (high card to straight flush)
+  name: string;
+  cards: Card[];
+  kickers: Card[];
+}
+
+export class PokerGame {
+  private state: GameState;
+  private startingStacks: Map<string, number> = new Map();
+  
+  constructor(players: Player[], blinds: { sb: number; bb: number }) {
+    // Initialize deck
+    const deck = this.createDeck();
+    this.shuffle(deck);
+    
+    // Set up players
+    const gamePlayers = players.map((p, i) => ({
+      ...p,
+      currentBet: 0,
+      totalInvested: 0,
+      hasFolded: false,
+      isAllIn: false,
+      position: i,
+      cards: [] as Card[],
+      isDealer: i === 0,
+      isSB: i === 1 % players.length,
+      isBB: i === 2 % players.length,
+    }));
+    
+    // Post blinds
+    const sbIndex = 1 % players.length;
+    const bbIndex = 2 % players.length;
+    gamePlayers[sbIndex].currentBet = blinds.sb;
+    gamePlayers[sbIndex].stack -= blinds.sb;
+    gamePlayers[sbIndex].totalInvested = blinds.sb;
+    gamePlayers[bbIndex].currentBet = blinds.bb;
+    gamePlayers[bbIndex].stack -= blinds.bb;
+    gamePlayers[bbIndex].totalInvested = blinds.bb;
+    
+    this.state = {
+      players: gamePlayers,
+      board: [],
+      pot: blinds.sb + blinds.bb,
+      currentBet: blinds.bb,
+      street: 'preflop',
+      actionOn: gamePlayers[(bbIndex + 1) % players.length].id,
+      history: [],
+      deck
+    };
+    
+    // Store starting stacks
+    players.forEach(p => this.startingStacks.set(p.id, p.stack));
+    
+    // Deal cards
+    this.dealHoleCards();
+  }
+  
+  private createDeck(): Card[] {
+    const deck: Card[] = [];
+    for (const suit of SUITS) {
+      for (const rank of RANKS) {
+        deck.push(`${rank}${suit}` as Card);
+      }
+    }
+    return deck;
+  }
+  
+  private shuffle(deck: Card[]): void {
+    for (let i = deck.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [deck[i], deck[j]] = [deck[j], deck[i]];
+    }
+  }
+  
+  private dealHoleCards(): void {
+    for (const player of this.state.players) {
+      if (!player.hasFolded) {
+        player.cards = [
+          this.state.deck.pop()!,
+          this.state.deck.pop()!
+        ];
+      }
+    }
+  }
+  
+  public getState(): GameState {
+    return { ...this.state };
+  }
+  
+  public getLegalActions(playerId: string): Action[] {
+    const player = this.state.players.find(p => p.id === playerId);
+    if (!player || player.hasFolded || player.isAllIn) return [];
+    
+    const actions: Action[] = [];
+    const toCall = this.state.currentBet - player.currentBet;
+    
+    if (toCall === 0) {
+      actions.push('check');
+      if (player.stack > 0) {
+        actions.push('bet');
+      }
+    } else {
+      actions.push('fold');
+      if (player.stack >= toCall) {
+        actions.push('call');
+        if (player.stack > toCall) {
+          actions.push('raise');
+        }
+      }
+      if (player.stack < toCall && player.stack > 0) {
+        actions.push('all-in');
+      }
+    }
+    
+    return actions;
+  }
+  
+  public executeAction(playerId: string, action: Action, amount?: number): boolean {
+    const player = this.state.players.find(p => p.id === playerId);
+    if (!player || this.state.actionOn !== playerId) return false;
+    
+    const legalActions = this.getLegalActions(playerId);
+    if (!legalActions.includes(action)) return false;
+    
+    // Record action
+    this.state.history.push({
+      playerId,
+      action,
+      amount,
+      street: this.state.street,
+      timestamp: Date.now()
+    });
+    
+    // Execute action
+    switch (action) {
+      case 'fold':
+        player.hasFolded = true;
+        break;
+        
+      case 'check':
+        // No change needed
+        break;
+        
+      case 'call':
+        const toCall = Math.min(this.state.currentBet - player.currentBet, player.stack);
+        player.stack -= toCall;
+        player.currentBet += toCall;
+        player.totalInvested += toCall;
+        this.state.pot += toCall;
+        if (player.stack === 0) player.isAllIn = true;
+        break;
+        
+      case 'bet':
+      case 'raise':
+        const betAmount = amount || this.state.pot * 0.66; // Default 66% pot
+        const actualBet = Math.min(betAmount, player.stack);
+        player.stack -= actualBet;
+        player.currentBet += actualBet;
+        player.totalInvested += actualBet;
+        this.state.pot += actualBet;
+        this.state.currentBet = player.currentBet;
+        if (player.stack === 0) player.isAllIn = true;
+        break;
+        
+      case 'all-in':
+        this.state.pot += player.stack;
+        player.totalInvested += player.stack;
+        player.currentBet += player.stack;
+        if (player.currentBet > this.state.currentBet) {
+          this.state.currentBet = player.currentBet;
+        }
+        player.stack = 0;
+        player.isAllIn = true;
+        break;
+    }
+    
+    // Move to next player or street
+    this.advanceGame();
+    return true;
+  }
+  
+  private advanceGame(): void {
+    const activePlayers = this.state.players.filter(p => !p.hasFolded);
+    
+    // Check if hand is over
+    if (activePlayers.length === 1) {
+      this.endHand();
+      return;
+    }
+    
+    // Check if betting round is complete
+    const needsAction = activePlayers.filter(p => 
+      !p.isAllIn && p.currentBet < this.state.currentBet
+    );
+    
+    if (needsAction.length === 0) {
+      // Move to next street
+      this.nextStreet();
+    } else {
+      // Move to next player
+      this.nextPlayer();
+    }
+  }
+  
+  private nextPlayer(): void {
+    const currentIndex = this.state.players.findIndex(p => p.id === this.state.actionOn);
+    let nextIndex = (currentIndex + 1) % this.state.players.length;
+    
+    // Find next active player
+    while (this.state.players[nextIndex].hasFolded || 
+           this.state.players[nextIndex].isAllIn ||
+           (this.state.players[nextIndex].currentBet === this.state.currentBet && 
+            this.state.currentBet > 0)) {
+      nextIndex = (nextIndex + 1) % this.state.players.length;
+      
+      // Prevent infinite loop
+      if (nextIndex === currentIndex) {
+        this.nextStreet();
+        return;
+      }
+    }
+    
+    this.state.actionOn = this.state.players[nextIndex].id;
+  }
+  
+  private nextStreet(): void {
+    // Reset current bets
+    this.state.players.forEach(p => p.currentBet = 0);
+    this.state.currentBet = 0;
+    
+    // Deal community cards
+    switch (this.state.street) {
+      case 'preflop':
+        this.state.street = 'flop';
+        this.state.board.push(
+          this.state.deck.pop()!,
+          this.state.deck.pop()!,
+          this.state.deck.pop()!
+        );
+        break;
+      case 'flop':
+        this.state.street = 'turn';
+        this.state.board.push(this.state.deck.pop()!);
+        break;
+      case 'turn':
+        this.state.street = 'river';
+        this.state.board.push(this.state.deck.pop()!);
+        break;
+      case 'river':
+        this.endHand();
+        return;
+    }
+    
+    // First to act is first active player after dealer
+    const dealerIndex = this.state.players.findIndex(p => p.isDealer);
+    let nextIndex = (dealerIndex + 1) % this.state.players.length;
+    
+    while (this.state.players[nextIndex].hasFolded || this.state.players[nextIndex].isAllIn) {
+      nextIndex = (nextIndex + 1) % this.state.players.length;
+    }
+    
+    this.state.actionOn = this.state.players[nextIndex].id;
+  }
+  
+  private endHand(): void {
+    const activePlayers = this.state.players.filter(p => !p.hasFolded);
+    
+    if (activePlayers.length === 1) {
+      // Winner by fold
+      activePlayers[0].stack += this.state.pot;
+    } else {
+      // Showdown - evaluate hands and distribute pot
+      const winners = this.evaluateShowdown(activePlayers);
+      const potShare = this.state.pot / winners.length;
+      winners.forEach(w => w.stack += potShare);
+    }
+    
+    // Reset for next hand (in practice mode, we'd start a new hand)
+    this.state.pot = 0;
+  }
+  
+  private evaluateShowdown(players: Player[]): Player[] {
+    // Simplified - in production would use proper hand evaluator
+    // For now, just return random winner(s)
+    return [players[Math.floor(Math.random() * players.length)]];
+  }
+  
+  public evaluateHand(cards: Card[], board: Card[]): HandRank {
+    // Simplified hand evaluation
+    // In production, would implement full hand ranking
+    return {
+      rank: Math.floor(Math.random() * 9) + 1,
+      name: 'High Card',
+      cards: cards.slice(0, 5),
+      kickers: []
+    };
+  }
+}
