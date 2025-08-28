@@ -10,7 +10,7 @@ interface TopBarProps {
 export default function TopBar({ userName }: TopBarProps) {
   return (
     <nav className="w-full nav-surface border-b border-white/5">
-      <div className="h-[var(--nav-height)] flex items-center justify-between px-[20px]">
+      <div className="h-[var(--nav-height)] flex items-center justify-between !px-[10px]">
         {/* Left: Brand */}
         <Link href="/" className="flex items-center gap-3 group">
           <div className="h-10 w-10 rounded-xl bg-gradient-to-br from-[var(--primary)] to-green-700 grid place-items-center shadow-lg group-hover:shadow-green-500/20 transition-shadow">

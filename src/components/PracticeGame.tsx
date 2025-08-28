@@ -23,6 +23,7 @@ import {
   realTimeGTOSolver,
   nashPushFoldSolver,
 } from "@/lib/poker/solvers/realTimeGTO";
+import { nashSolver } from "@/lib/poker/solvers/nashEquilibriumSolver";
 
 interface GameStats {
   handsPlayed: number;
@@ -88,11 +89,14 @@ export default function PracticeGame({
    * Start a new hand with 3 players
    */
   const startNewHand = useCallback(() => {
+    // Using 15BB stacks for perfect Nash equilibrium play
+    const STACK_SIZE = 15; // 15 big blinds
+    
     const initialPlayers: Player[] = [
       {
         id: "btn",
         name: "BTN",
-        stack: 100,
+        stack: STACK_SIZE,
         cards: [] as [],
         currentBet: 0,
         totalInvested: 0,
@@ -105,7 +109,7 @@ export default function PracticeGame({
       {
         id: "hero",
         name: playerName,
-        stack: 100,
+        stack: STACK_SIZE,
         cards: [] as [],
         currentBet: 0,
         totalInvested: 0,
@@ -113,12 +117,12 @@ export default function PracticeGame({
         isAllIn: false,
         isHero: true,
         position: 1,
-        isSB: true, // Hero is SB (like GTO Wizard)
+        isSB: true, // Hero is SB
       },
       {
         id: "bb",
         name: "BB",
-        stack: 100,
+        stack: STACK_SIZE,
         cards: [] as [],
         currentBet: 0,
         totalInvested: 0,
@@ -298,36 +302,9 @@ export default function PracticeGame({
       let amount: number | undefined;
 
       try {
-        // Use real GTO solver for bot decisions
-        const gtoStrategy = realTimeGTOSolver.getGTOStrategy(
-          state,
-          currentBot.id
-        );
-
-        if (gtoStrategy.length > 0) {
-          // Sample action from GTO mixed strategy
-          const random = Math.random();
-          let cumProb = 0;
-
-          for (const { action: gtoAction, frequency } of gtoStrategy) {
-            cumProb += frequency;
-            if (random < cumProb) {
-              action = gtoAction;
-              break;
-            }
-          }
-
-          // if no action picked use highest EV one
-          if (!action && gtoStrategy.length > 0) {
-            action = gtoStrategy[0].action;
-          }
-        } else {
-          // fallback if no GTO strategy
-          console.warn(
-            `No GTO strategy for ${currentBot.name}, using fallback`
-          );
-          action = "check";
-        }
+        // Use Nash equilibrium solver for 15BB
+        action = nashSolver.sampleNashAction(state, currentBot.id);
+        console.log(`${currentBot.name} Nash action:`, action);
       } catch (error) {
         console.error(`GTO solver error for ${currentBot.name}:`, error);
         // Fallback to simple strategy if GTO solver fails
@@ -468,17 +445,11 @@ export default function PracticeGame({
         explanation: isOptimalPlay
           ? `Perfect! This is the highest EV play: ${playerAction.ev.toFixed(
               2
-            )} BB (GTO plays this ${playerAction.gtoFrequency}% of the time)`
+            )} BB`
           : isGTOPlay
-          ? `Acceptable mixed strategy play. EV: ${playerAction.ev.toFixed(
+          ? `Acceptable play. EV: ${playerAction.ev.toFixed(
               2
-            )} BB (GTO frequency: ${playerAction.gtoFrequency}%)`
-          : playerAction?.gtoFrequency > 50
-          ? `This is a high-frequency play (${playerAction.gtoFrequency}%), but the EV is poor: ${
-              playerAction.ev.toFixed(2)
-            } BB. The optimal play is ${optimalAction.action} with EV: ${
-              optimalAction.ev.toFixed(2)
-            } BB`
+            )} BB`
           : `Suboptimal. The best play is ${
               optimalAction.action
             } with EV: ${optimalAction.ev.toFixed(
@@ -546,56 +517,55 @@ export default function PracticeGame({
   };
 
   /**
-   * Calculate EV for all possible actions using REAL GTO
+   * Calculate EV for all possible actions using Nash Equilibrium at 15BB
    */
   const calculateEVBreakdown = (gameInstance: PokerGame, state: any): any[] => {
     const hero = state.players.find((p: Player) => p.isHero);
     if (!hero || !hero.cards || hero.cards.length !== 2) return [];
 
-    try {
-      // Use real GTO solver for accurate calculations
-      const gtoStrategy = realTimeGTOSolver.getGTOStrategy(state, hero.id);
-      console.log("GTO strategy for hero:", gtoStrategy);
+    // Use Nash equilibrium solver for 15BB
+    const nashDecisions = nashSolver.getDecision(state, hero.id);
+    console.log("Nash decisions for hero:", nashDecisions);
 
-      if (gtoStrategy.length > 0) {
-        // Convert GTO strategy to our format
-        const breakdown = gtoStrategy.map(({ action, frequency, ev }) => ({
-          action,
-          ev,
-          gtoFrequency: Math.round(frequency * 100),
-          isOptimal: false, // Will be set below
-        }));
+    if (nashDecisions.length > 0) {
+      // Convert Nash decisions to our format
+      const breakdown = nashDecisions.map((decision) => ({
+        action: decision.action === 'push' ? 'all-in' : decision.action,
+        ev: decision.ev,
+        gtoFrequency: Math.round(decision.frequency),
+        isOptimal: false,
+      }));
 
-        // Mark ONLY the highest EV action as optimal (not all with similar values)
-        const maxEV = Math.max(...breakdown.map((b) => b.ev));
-        breakdown.forEach((item) => {
-          item.isOptimal = false; // Reset all
-        });
-        // Find the action with truly highest EV
-        const bestAction = breakdown.reduce((best, current) => 
-          current.ev > best.ev ? current : best
-        );
-        if (bestAction) {
-          bestAction.isOptimal = true;
-        }
-
-        // Ensure fold is always an option with correct EV
-        if (!breakdown.find((b) => b.action === "fold")) {
-          const hero = state.players.find((p: Player) => p.isHero);
-          breakdown.push({
-            action: "fold",
-            ev: hero ? -hero.totalInvested : 0,
-            gtoFrequency: 0,
-            isOptimal: false,
-          });
-        }
-
-        return breakdown;
+      // Mark the highest EV action as optimal
+      const maxEV = Math.max(...breakdown.map((b) => b.ev));
+      const bestAction = breakdown.find((item) => Math.abs(item.ev - maxEV) < 0.001);
+      if (bestAction) {
+        bestAction.isOptimal = true;
       }
-    } catch (error) {}
 
-    // Fallback to heuristic-based calculations if GTO solver fails
-    return calculateEVBreakdownHeuristic(gameInstance, state);
+      // At 15BB, the main actions are push (all-in) or fold
+      // Make sure we have both options
+      if (!breakdown.find((b) => b.action === "fold")) {
+        breakdown.push({
+          action: "fold",
+          ev: -hero.totalInvested,
+          gtoFrequency: 0,
+          isOptimal: false,
+        });
+      }
+
+      return breakdown;
+    }
+
+    // Fallback - should rarely happen with Nash solver
+    return [
+      {
+        action: "fold",
+        ev: -hero.totalInvested,
+        gtoFrequency: 100,
+        isOptimal: true,
+      }
+    ];
   };
 
   /**
@@ -649,8 +619,14 @@ export default function PracticeGame({
       if (highCard >= 9) baseEquity = 0.35;
       else baseEquity = 0.3;
     } else if (highCard <= 9 && lowCard <= 7) {
-      // Weak hands like 93o
-      baseEquity = isSuited ? 0.25 : 0.2;
+      // Weak hands like 93o, 94o
+      // These are trash hands with very poor equity
+      if (Math.abs(highCard - lowCard) >= 3) {
+        // Large gap hands like 94o are even worse
+        baseEquity = isSuited ? 0.22 : 0.18;
+      } else {
+        baseEquity = isSuited ? 0.25 : 0.2;
+      }
     } else {
       // Other hands
       baseEquity = isSuited ? 0.3 : 0.25;
@@ -684,7 +660,17 @@ export default function PracticeGame({
     if (toCall > 0) {
       // EV = (equity * total pot after calling) - amount to call
       const totalPotAfterCall = pot + toCall;
-      const callEV = equityDecimal * totalPotAfterCall - toCall;
+      
+      // Reduce realized equity for trash hands and when out of position
+      let realizedEquity = equityDecimal;
+      if (hero.isSB) {
+        realizedEquity *= 0.9; // Out of position penalty
+      }
+      if (baseEquity < 0.3) {
+        realizedEquity *= 0.85; // Trash hands don't realize full equity
+      }
+      
+      const callEV = realizedEquity * totalPotAfterCall - toCall;
 
       // Adjust frequency based on hand strength and pot odds
       const potOdds = toCall / (pot + toCall);
@@ -739,27 +725,67 @@ export default function PracticeGame({
     const raiseCost = raiseSize - hero.currentBet;
 
     if (hero.stack >= raiseCost && raiseCost > 0) {
-      let foldEquity = 0.3;
-
+      // Calculate fold equity more realistically
+      // Key factors: raise size, hand strength, position, game state
+      
+      // Check how many players have already folded (affects fold equity)
+      const foldedPlayers = state.players.filter((p: Player) => p.hasFolded).length;
+      const activePlayers = state.players.filter((p: Player) => !p.hasFolded && !p.isHero).length;
+      
+      // Base fold equity depends on raise size to pot
       const raiseToPotRatio = raiseCost / pot;
-      if (raiseToPotRatio > 1) {
-        foldEquity += 0.1;
-      } else if (raiseToPotRatio < 0.5) {
-        foldEquity -= 0.1;
+      let foldEquity = 0;
+      
+      if (raiseToPotRatio > 2) {
+        // Large overbet - some fold equity
+        foldEquity = 0.4;
+      } else if (raiseToPotRatio > 1) {
+        // Pot-sized bet - moderate fold equity
+        foldEquity = 0.25;
+      } else if (raiseToPotRatio > 0.66) {
+        // 2/3 pot - low fold equity
+        foldEquity = 0.15;
+      } else {
+        // Min-raise or small bet - almost no fold equity
+        foldEquity = 0.05;
       }
-
-      if (baseEquity > 0.5) {
-        foldEquity -= 0.05;
-      } else if (baseEquity < 0.25) {
-        foldEquity -= 0.1;
+      
+      // Adjust based on situation
+      if (foldedPlayers > 0 && activePlayers === 1) {
+        // Heads-up after someone folded - BB defends wide
+        foldEquity *= 0.5; 
       }
+      
+      // If we're raising a very small amount (like min-raising), BB calls with any two cards
+      const potOddsForVillain = raiseCost / (pot + raiseCost * 2);
+      if (potOddsForVillain < 0.25) {
+        // Villain getting better than 3:1, calls very wide
+        foldEquity = Math.min(foldEquity, 0.1);
+      }
+      
+      // Trash hands get less credit (villain knows we should have folded)
+      if (baseEquity < 0.25) {
+        foldEquity *= 0.5;
+      }
+      
+      foldEquity = Math.max(0.02, Math.min(0.5, foldEquity));
 
-      foldEquity = Math.max(0.1, Math.min(0.6, foldEquity));
-
-      const futurePot = pot + raiseCost * 2; // Assume one caller
-      const raiseEV =
-        foldEquity * pot +
-        (1 - foldEquity) * (equityDecimal * futurePot - raiseCost);
+      // Calculate raise EV more accurately
+      // When called, we need to win at showdown
+      const futurePot = pot + raiseCost * 2;
+      
+      // Account for being out of position (SB) - reduces EV
+      const positionPenalty = hero.isSB ? 0.9 : 1.0;
+      
+      // For trash hands, reduce realized equity (we won't play well postflop)
+      let realizedEquity = equityDecimal;
+      if (baseEquity < 0.3) {
+        realizedEquity *= 0.8; // Trash hands realize less equity
+      }
+      
+      const raiseEV = 
+        foldEquity * pot + 
+        (1 - foldEquity) * (realizedEquity * positionPenalty * futurePot - raiseCost);
 
       let raiseFreq = 15;
 
@@ -1265,12 +1291,6 @@ export default function PracticeGame({
                             </div>
                             <div className="flex items-center gap-4">
                               <span
-                                className="text-xs text-gray-500"
-                                title="How often GTO plays this action"
-                              >
-                                Freq: {item.gtoFrequency}%
-                              </span>
-                              <span
                                 className={`text-sm font-mono ${
                                   item.ev > 0
                                     ? "text-green-400"
@@ -1287,8 +1307,7 @@ export default function PracticeGame({
                         ))}
                       </div>
                       <div className="text-xs text-gray-500 mt-2">
-                        <strong>Note:</strong> "Highest EV" = the single best action by expected value. 
-                        "Freq" = how often GTO strategy would choose this action (mixing frequency).
+                        <strong>Note:</strong> "Highest EV" = the single best action by expected value.
                       </div>
                     </div>
                   </div>

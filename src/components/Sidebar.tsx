@@ -78,8 +78,10 @@ export default function Sidebar({
   isCollapsed = false,
   onToggle,
 }: SidebarProps) {
-  const [active, setActive] = useState<Section>("curriculum");
   const pathname = usePathname();
+  const [active, setActive] = useState<Section>(
+    pathname.includes("/practice") ? "practice" : "curriculum"
+  );
   const userParam = userName ? `?name=${encodeURIComponent(userName)}` : "";
 
   if (isCollapsed) {
@@ -147,7 +149,7 @@ export default function Sidebar({
         </div>
 
         {/* Section tabs */}
-        <div className="flex gap-2 p-3">
+        <div className="flex !pl-[10px] gap-1 p-3">
           <button
             onClick={() => setActive("curriculum")}
             className={`seg ${active === "curriculum" ? "seg-active" : ""}`}
