@@ -88,9 +88,10 @@ export class PokerGame {
     gamePlayers[bbIndex].stack -= blinds.bb;
     gamePlayers[bbIndex].totalInvested = blinds.bb;
     
-    // In 3-player game: SB acts first preflop (after blinds)
-    // Order is SB → BB → BTN (BTN gets last action preflop)
-    const firstToAct = players.length === 3 ? gamePlayers[sbIndex].id : gamePlayers[(bbIndex + 1) % players.length].id;
+    // In 3-player game preflop: After blinds are posted, BTN acts first (UTG position)
+    // Action order: BTN → SB → BB (BB has option to check/raise even if just called)
+    const dealerIndex = gamePlayers.findIndex(p => p.isDealer);
+    const firstToAct = players.length === 3 ? gamePlayers[dealerIndex].id : gamePlayers[(bbIndex + 1) % players.length].id;
     
     this.state = {
       players: gamePlayers,
@@ -443,6 +444,7 @@ export class PokerGame {
     
     // Reset for next hand (in practice mode, we'd start a new hand)
     this.state.pot = 0;
+    this.state.actionOn = ''; // Clear action to indicate hand is over
   }
   
   private evaluateShowdown(players: Player[]): Player[] {

@@ -19,6 +19,7 @@ import { PokerGame, Card, Player, Action, Street } from "@/lib/poker/engine";
 import { pushFoldSolver } from "@/lib/poker/solvers/pushFoldNash";
 import { riverSolver } from "@/lib/poker/solvers/riverSolver";
 import { mcts } from "@/lib/poker/solvers/mcts";
+import { realTimeGTOSolver, nashPushFoldSolver } from "@/lib/poker/solvers/realTimeGTO";
 
 interface GameStats {
   handsPlayed: number;
@@ -80,19 +81,6 @@ export default function PracticeGame({ playerName = "Player" }: { playerName?: s
   const startNewHand = useCallback(() => {
     const initialPlayers: Player[] = [
       {
-        id: 'villain2',
-        name: 'GTO Bot 2',
-        stack: 100,
-        cards: [] as Card[],
-        currentBet: 0,
-        totalInvested: 0,
-        hasFolded: false,
-        isAllIn: false,
-        isHero: false,
-        position: 0,
-        isDealer: true
-      },
-      {
         id: 'hero',
         name: playerName,
         stack: 100,
@@ -102,8 +90,8 @@ export default function PracticeGame({ playerName = "Player" }: { playerName?: s
         hasFolded: false,
         isAllIn: false,
         isHero: true,
-        position: 1,
-        isSB: true
+        position: 0,
+        isDealer: true  // User is BTN/Dealer for maximum action flexibility
       },
       {
         id: 'villain1',
@@ -115,8 +103,21 @@ export default function PracticeGame({ playerName = "Player" }: { playerName?: s
         hasFolded: false,
         isAllIn: false,
         isHero: false,
+        position: 1,
+        isSB: true  // Bot 1 is SB
+      },
+      {
+        id: 'villain2',
+        name: 'GTO Bot 2',
+        stack: 100,
+        cards: [] as Card[],
+        currentBet: 0,
+        totalInvested: 0,
+        hasFolded: false,
+        isAllIn: false,
+        isHero: false,
         position: 2,
-        isBB: true
+        isBB: true  // Bot 2 is BB
       }
     ];
     
@@ -136,11 +137,14 @@ export default function PracticeGame({ playerName = "Player" }: { playerName?: s
     
     setBoard([]);
     setPot(gameState.pot);
+    console.log('Initial pot value:', gameState.pot); // Debug log
     setHandHistory([`New hand #${stats.handsPlayed + 1} started`]);
     setShowFeedback(false);
     setLastFeedback(null);
     setIsHeroTurn(gameState.actionOn === 'hero');
-    setBetAmount(gameState.currentBet * 3); // Default raise size
+    // Set default bet amount to a valid raise (minimum is 2x current bet)
+    const minRaise = gameState.currentBet * 2;
+    setBetAmount(minRaise); // Default to minimum raise
     
     // Update stats
     setStats(prev => ({
@@ -247,68 +251,77 @@ export default function PracticeGame({ playerName = "Player" }: { playerName?: s
     const currentBot = state.players.find(p => p.id === state.actionOn);
     
     if (!currentBot || currentBot.isHero) {
+      console.log('Bot action skipped - not a bot turn');
       return;
     }
     
-    // Prevent infinite loops - check if we're stuck
-    const recentHistory = state.history.slice(-5);
-    const stuckChecking = recentHistory.length >= 5 && 
-      recentHistory.every(h => h.action === 'check' && h.playerId === currentBot.id);
+    console.log('Bot acting:', currentBot.name, 'position:', currentBot.isSB ? 'SB' : currentBot.isBB ? 'BB' : 'BTN');
     
-    if (stuckChecking) {
-      console.error('Bot stuck checking, forcing different action');
-      // Force a different action if stuck
-      action = 'bet';
-      const legalActions = gameInstance.getLegalActions(currentBot.id);
-      if (!legalActions.includes('bet')) {
-        action = legalActions.find(a => a !== 'check') || legalActions[0];
-      }
-      gameInstance.executeAction(currentBot.id, action, state.pot * 0.5);
-      return;
-    }
-    
-    // Use different strategies based on stack size and street
     let action: Action;
-    const effectiveStack = currentBot.stack;
-    const potSize = state.pot;
+    let amount: number | undefined;
     
-    // Short stack: use push/fold
-    if (effectiveStack < 20) {
-      const shouldPush = Math.random() < 0.3; // Simplified
-      action = shouldPush ? 'all-in' : 'fold';
-    }
-    // River: use river solver
-    else if (state.street === 'river') {
-      const bluffFreq = riverSolver.calculateBluffToValueRatio(state.currentBet || potSize * 0.66, potSize);
-      if (Math.random() < bluffFreq) {
-        action = 'raise';
+    try {
+      // Use real GTO solver for bot decisions
+      const gtoStrategy = realTimeGTOSolver.getGTOStrategy(state, currentBot.id);
+      
+      if (gtoStrategy.length > 0) {
+        // Sample action from GTO mixed strategy
+        const random = Math.random();
+        let cumProb = 0;
+        
+        for (const { action: gtoAction, frequency } of gtoStrategy) {
+          cumProb += frequency;
+          if (random < cumProb) {
+            action = gtoAction;
+            break;
+          }
+        }
+        
+        // If somehow we didn't pick an action, use the highest EV one
+        if (!action) {
+          action = gtoStrategy[0].action;
+        }
       } else {
-        action = state.currentBet > currentBot.currentBet ? 'call' : 'check';
+        // Fallback if no GTO strategy
+        action = 'check';
       }
-    }
-    // Use simplified MCTS logic
-    else {
+    } catch (error) {
+      // Fallback to simple strategy if GTO solver fails
+      console.log('Bot GTO solver failed, using simple strategy');
       const random = Math.random();
       const toCall = state.currentBet - currentBot.currentBet;
       
+      // SB and BB should fold more often with random hands when facing raises
+      const isBlinds = currentBot.isSB || currentBot.isBB;
+      const foldFrequency = isBlinds && toCall > 0 ? 0.4 : 0.2; // Blinds fold 40% when facing raises
+      
       if (toCall === 0) {
-        // Can check or bet
         action = random < 0.7 ? 'check' : 'bet';
       } else {
-        // Must call, raise, or fold
-        if (random < 0.2) action = 'fold';
+        if (random < foldFrequency) action = 'fold';
         else if (random < 0.6) action = 'call';
         else action = 'raise';
       }
+    }
+    
+    // Make sure we have a valid action
+    if (!action) {
+      console.error('No action selected for bot, defaulting to check/fold');
+      action = state.currentBet > currentBot.currentBet ? 'fold' : 'check';
     }
     
     // Execute bot action
     const legalActions = gameInstance.getLegalActions(currentBot.id);
     if (!legalActions.includes(action)) {
       action = legalActions[0]; // Fallback to first legal action
+      if (!action) {
+        console.error('No legal actions available for bot');
+        return;
+      }
     }
     
-    let amount: number | undefined;
+    // Calculate bet/raise sizing
+    const potSize = state.pot;
     if (action === 'bet') {
       amount = potSize * 0.66;
     } else if (action === 'raise') {
@@ -317,36 +330,87 @@ export default function PracticeGame({ playerName = "Player" }: { playerName?: s
       amount = Math.max(minRaise, state.currentBet + potSize * 0.66);
     }
     
-    gameInstance.executeAction(currentBot.id, action, amount);
+    const actionSuccess = gameInstance.executeAction(currentBot.id, action, amount);
+    if (!actionSuccess) {
+      console.error('Bot action failed:', currentBot.name, action, amount);
+      return;
+    }
     
     // Update UI
     const newState = gameInstance.getState();
+    console.log('After bot action - next player:', newState.actionOn, 'street:', newState.street);
     setPlayers(newState.players);
     setPot(newState.pot);
     setCurrentStreet(newState.street);
     setBoard(newState.board);
     setHandHistory(prev => [...prev, `${currentBot.name} ${action}${amount ? ` $${amount.toFixed(2)}` : ''}`]);
     
+    // Check if hand is over
+    if (!newState.actionOn || newState.actionOn === '') {
+      // Hand is over - display winner and auto-start new hand
+      console.log('Hand complete after bot action');
+      setIsHeroTurn(false);
+      setHandHistory(prev => [...prev, '--- Hand Complete ---']);
+      // Auto-start new hand after 2 seconds
+      setTimeout(() => startNewHand(), 2000);
+      return;
+    }
+    
     // Check if it's hero's turn now
     if (newState.actionOn === 'hero') {
+      console.log('Hero turn after bot action');
       setIsHeroTurn(true);
       updateCalculations(gameInstance);
-    } else if (newState.actionOn && newState.actionOn !== 'hero') {
+    } else if (newState.actionOn !== 'hero') {
       // Another bot's turn
+      console.log('Another bot turn:', newState.actionOn);
       setTimeout(() => botAction(gameInstance), 1500);
     }
-  }, [updateCalculations]);
+  }, [updateCalculations, startNewHand]);
 
   /**
    * Handle hero action
    */
   const handleAction = useCallback((action: Action, amount?: number) => {
-    if (!game || !isHeroTurn) return;
+    if (!game || !isHeroTurn) {
+      console.log('Cannot act - game:', !!game, 'isHeroTurn:', isHeroTurn);
+      return;
+    }
     
+    // Generate GTO feedback with EV breakdown BEFORE executing the action
+    const stateBeforeAction = game.getState();
+    const evBreakdown = calculateEVBreakdown(game, stateBeforeAction);
+    const optimalAction = evBreakdown.reduce((best, current) => 
+      current.ev > best.ev ? current : best
+    );
+    
+    // Check if this is actually a GTO play (within frequency range)
+    const playerAction = evBreakdown.find(a => a.action === action);
+    const isGTOPlay = playerAction && playerAction.gtoFrequency > 0;
+    
+    const feedback: DecisionFeedback = {
+      action,
+      isGTO: isGTOPlay || action === optimalAction.action,
+      expectedValue: playerAction?.ev || 0,
+      explanation: isGTOPlay 
+        ? playerAction.isOptimal 
+          ? `Perfect GTO play! This action has the highest EV of ${playerAction.ev.toFixed(2)} BB and is played ${playerAction.gtoFrequency}% of the time in GTO strategy`
+          : `Good GTO play! This action is part of a mixed strategy (${playerAction.gtoFrequency}% frequency) with EV of ${playerAction.ev.toFixed(2)} BB`
+        : `The GTO play here is ${optimalAction.action} with EV of ${optimalAction.ev.toFixed(2)} BB. Your ${action} has EV of ${playerAction?.ev.toFixed(2) || '0.00'} BB`,
+      evBreakdown
+    };
+    setLastFeedback(feedback);
+    setShowFeedback(true);
+    
+    console.log('Executing action:', action, 'amount:', amount);
     const success = game.executeAction('hero', action, amount);
-    if (!success) return;
+    if (!success) {
+      console.error('Action failed:', action, amount);
+      return;
+    }
     
     const state = game.getState();
+    console.log('After hero action - next player:', state.actionOn, 'street:', state.street);
     setPlayers(state.players);
     setPot(state.pot);
     setCurrentStreet(state.street);
@@ -355,29 +419,21 @@ export default function PracticeGame({ playerName = "Player" }: { playerName?: s
     setSelectedAction(null);
     setHandHistory(prev => [...prev, `You ${action}${amount ? ` $${amount.toFixed(2)}` : ''}`]);
     
-    // Generate GTO feedback with EV breakdown
-    const evBreakdown = calculateEVBreakdown(game, state);
-    const optimalAction = evBreakdown.reduce((best, current) => 
-      current.ev > best.ev ? current : best
-    );
+    // Check if hand is over
+    if (!state.actionOn || state.actionOn === '') {
+      // Hand is over
+      setIsHeroTurn(false);
+      setHandHistory(prev => [...prev, '--- Hand Complete ---']);
+      // Auto-start new hand after 2 seconds
+      setTimeout(() => startNewHand(), 2000);
+      return;
+    }
     
-    const feedback: DecisionFeedback = {
-      action,
-      isGTO: action === optimalAction.action,
-      expectedValue: evBreakdown.find(a => a.action === action)?.ev || 0,
-      explanation: action === optimalAction.action 
-        ? `GTO play! This action has the highest EV of ${optimalAction.ev.toFixed(2)} BB`
-        : `The GTO play here is ${optimalAction.action} with EV of ${optimalAction.ev.toFixed(2)} BB. Your ${action} has EV of ${evBreakdown.find(a => a.action === action)?.ev.toFixed(2)} BB`,
-      evBreakdown
-    };
-    setLastFeedback(feedback);
-    setShowFeedback(true);
-    
-    // Check for hand end or next action
-    if (state.actionOn && state.actionOn !== 'hero') {
+    // Check for next action
+    if (state.actionOn !== 'hero') {
       setTimeout(() => botAction(game), 1500);
     }
-  }, [game, isHeroTurn, botAction]);
+  }, [game, isHeroTurn, botAction, startNewHand]);
 
   const getRankValue = (rank: string): number => {
     const values: Record<string, number> = {
@@ -388,66 +444,259 @@ export default function PracticeGame({ playerName = "Player" }: { playerName?: s
   };
   
   /**
-   * Calculate EV for all possible actions
+   * Calculate EV for all possible actions using REAL GTO
    */
   const calculateEVBreakdown = (gameInstance: PokerGame, state: any): any[] => {
     const hero = state.players.find((p: Player) => p.isHero);
-    if (!hero) return [];
+    if (!hero || !hero.cards || hero.cards.length !== 2) return [];
+    
+    try {
+      // Use real GTO solver for accurate calculations
+      const gtoStrategy = realTimeGTOSolver.getGTOStrategy(state, hero.id);
+      
+      if (gtoStrategy.length > 0) {
+        // Convert GTO strategy to our format
+        const breakdown = gtoStrategy.map(({ action, frequency, ev }) => ({
+          action,
+          ev,
+          gtoFrequency: Math.round(frequency * 100),
+          isOptimal: false // Will be set below
+        }));
+        
+        // Mark the highest EV action as optimal
+        const maxEV = Math.max(...breakdown.map(b => b.ev));
+        breakdown.forEach(item => {
+          item.isOptimal = Math.abs(item.ev - maxEV) < 0.001;
+        });
+        
+        // Ensure fold is always an option
+        if (!breakdown.find(b => b.action === 'fold')) {
+          breakdown.push({
+            action: 'fold',
+            ev: 0,
+            gtoFrequency: 0,
+            isOptimal: false
+          });
+        }
+        
+        return breakdown;
+      }
+    } catch (error) {
+      console.log('GTO solver failed, falling back to heuristics', error);
+    }
+    
+    // Fallback to heuristic-based calculations if GTO solver fails
+    return calculateEVBreakdownHeuristic(gameInstance, state);
+  };
+  
+  /**
+   * Heuristic-based EV calculation (fallback)
+   */
+  const calculateEVBreakdownHeuristic = (gameInstance: PokerGame, state: any): any[] => {
+    const hero = state.players.find((p: Player) => p.isHero);
+    if (!hero || !hero.cards || hero.cards.length !== 2) return [];
     
     const pot = state.pot;
     const toCall = state.currentBet - hero.currentBet;
-    // Use the actual calculated equity (from state) or calculate it here
-    const equityPercent = equity || 35; // Use state equity or default
-    const equityDecimal = equityPercent / 100;
+    
+    console.log('=== EV Calculation Debug ===');
+    console.log('Pot:', pot, 'To call:', toCall, 'Street:', state.street);
+    console.log('Hero cards:', hero.cards, 'Position:', hero.isDealer ? 'BTN' : 'Other');
+    
+    // Calculate actual hand strength more accurately
+    const card1Rank = getRankValue(hero.cards[0][0] as any);
+    const card2Rank = getRankValue(hero.cards[1][0] as any);
+    const isPair = hero.cards[0][0] === hero.cards[1][0];
+    const isSuited = hero.cards[0][1] === hero.cards[1][1];
+    const isConnected = Math.abs(card1Rank - card2Rank) === 1;
+    const hasAce = card1Rank === 14 || card2Rank === 14;
+    const hasKing = card1Rank === 13 || card2Rank === 13;
+    const highCard = Math.max(card1Rank, card2Rank);
+    const lowCard = Math.min(card1Rank, card2Rank);
+    
+    // More realistic preflop equity calculations for 3 players
+    let baseEquity = 0.33; // Start at 33% (average for 3 players)
+    
+    if (isPair) {
+      // Pocket pairs
+      if (card1Rank >= 12) baseEquity = 0.70; // QQ+
+      else if (card1Rank >= 10) baseEquity = 0.60; // TT-JJ
+      else if (card1Rank >= 8) baseEquity = 0.50; // 88-99
+      else if (card1Rank >= 5) baseEquity = 0.45; // 55-77
+      else baseEquity = 0.40; // 22-44
+    } else if (hasAce) {
+      // Ace-high hands
+      if (lowCard >= 10) baseEquity = isSuited ? 0.50 : 0.45; // AT+
+      else if (lowCard >= 7) baseEquity = isSuited ? 0.40 : 0.35; // A7-A9
+      else baseEquity = isSuited ? 0.35 : 0.30; // A2-A6
+    } else if (hasKing && lowCard >= 10) {
+      // King-high broadway
+      baseEquity = isSuited ? 0.42 : 0.37;
+    } else if (highCard >= 10 && lowCard >= 10) {
+      // Broadway cards
+      baseEquity = isSuited ? 0.40 : 0.35;
+    } else if (isConnected && isSuited) {
+      // Suited connectors
+      if (highCard >= 9) baseEquity = 0.35;
+      else baseEquity = 0.30;
+    } else if (highCard <= 9 && lowCard <= 7) {
+      // Weak hands like 93o
+      baseEquity = isSuited ? 0.25 : 0.20;
+    } else {
+      // Other hands
+      baseEquity = isSuited ? 0.30 : 0.25;
+    }
+    
+    const equityDecimal = baseEquity;
+    
+    console.log('Base equity:', baseEquity, 'Cards category:', isPair ? 'pair' : isSuited ? 'suited' : 'offsuit');
     
     const breakdown = [];
     
-    // Calculate fold EV (always 0)
+    // Calculate fold EV (always 0 - we lose nothing more)
     breakdown.push({
       action: 'fold',
       ev: 0,
       gtoFrequency: 10,
-      isOptimal: false // Never optimal when we have positive EV options
+      isOptimal: false
     });
     
     // Calculate call EV
     if (toCall > 0) {
-      const callEV = equityDecimal * (pot + toCall) - toCall;
+      // EV = (equity * total pot after calling) - amount to call
+      // This gives us our expected profit/loss from calling
+      const totalPotAfterCall = pot + toCall;
+      const callEV = (equityDecimal * totalPotAfterCall) - toCall;
+      
+      // Adjust frequency based on hand strength and pot odds
+      const potOdds = toCall / (pot + toCall);
+      let callFreq = 30;
+      
+      // If we have better equity than pot odds, we should call more
+      if (equityDecimal > potOdds) {
+        callFreq = 50 + Math.round((equityDecimal - potOdds) * 100);
+      } else if (equityDecimal < potOdds * 0.8) {
+        // If we're way below pot odds, rarely call
+        callFreq = 5;
+      }
+      
       breakdown.push({
         action: 'call',
         ev: callEV,
-        gtoFrequency: 60,
-        isOptimal: false // Will be set below
+        gtoFrequency: Math.min(60, Math.max(0, callFreq)),
+        isOptimal: false
       });
     }
     
-    // Calculate check EV
-    if (toCall === 0) {
+    // Calculate check EV (only postflop or BB preflop with no raise)
+    if (toCall === 0 && (state.street !== 'preflop' || (hero.isBB && state.currentBet === 1))) {
       const checkEV = equityDecimal * pot;
       breakdown.push({
         action: 'check',
         ev: checkEV,
-        gtoFrequency: 50,
-        isOptimal: false // Will be set below
+        gtoFrequency: 40,
+        isOptimal: false
       });
     }
     
-    // Calculate raise/bet EV (simplified)
-    const raiseSize = state.currentBet * 2 || pot * 0.66;
-    const foldEquity = 0.3; // Simplified fold equity
-    const raiseEV = foldEquity * pot + (1 - foldEquity) * (equityDecimal * (pot + raiseSize * 2) - raiseSize);
-    breakdown.push({
-      action: toCall === 0 ? 'bet' : 'raise',
-      ev: raiseEV,
-      gtoFrequency: 30,
-      isOptimal: false // Will be set below
-    });
+    // Calculate raise/bet EV
+    // Determine the correct action name
+    const isPreflop = state.street === 'preflop';
+    const actionName = toCall > 0 ? 'raise' : (isPreflop ? 'raise' : 'bet');
+    
+    // Calculate raise sizing
+    const minRaise = state.currentBet * 2 || 2;
+    const raiseSize = toCall > 0 
+      ? Math.max(minRaise, state.currentBet + pot * 0.66) 
+      : Math.max(pot * 0.66, 2);
+    const raiseCost = raiseSize - hero.currentBet;
+    
+    // Only calculate raise EV if we have enough chips
+    if (hero.stack >= raiseCost && raiseCost > 0) {
+      // Estimate fold equity based on position and raise size
+      let foldEquity = 0.30; // Base fold equity
+      
+      // Adjust based on raise size relative to pot
+      const raiseToPotRatio = raiseCost / pot;
+      if (raiseToPotRatio > 1) {
+        foldEquity += 0.1; // Larger raises get more folds
+      } else if (raiseToPotRatio < 0.5) {
+        foldEquity -= 0.1; // Small raises get called more
+      }
+      
+      // Adjust based on hand strength (stronger hands get called more)
+      if (baseEquity > 0.5) {
+        foldEquity -= 0.05; // Strong hands face more resistance
+      } else if (baseEquity < 0.25) {
+        foldEquity -= 0.10; // Bluffs with weak hands get called more
+      }
+      
+      foldEquity = Math.max(0.1, Math.min(0.6, foldEquity));
+      
+      // Calculate raise EV
+      // EV = P(everyone folds) * pot + P(get called) * (equity * future pot - raise cost)
+      const futurePot = pot + raiseCost * 2; // Assume one caller
+      const raiseEV = foldEquity * pot + (1 - foldEquity) * (equityDecimal * futurePot - raiseCost);
+      
+      // Calculate GTO frequency based on hand strength and EV
+      let raiseFreq = 15; // Base frequency
+      
+      if (baseEquity > 0.6) {
+        // Premium hands raise frequently
+        raiseFreq = 60 + Math.round(raiseEV * 10);
+      } else if (baseEquity > 0.45) {
+        // Good hands raise moderately
+        raiseFreq = 35 + Math.round(raiseEV * 5);
+      } else if (baseEquity > 0.35) {
+        // Decent hands raise occasionally
+        raiseFreq = 20 + Math.round(raiseEV * 3);
+      } else if (raiseEV > 0.5) {
+        // Bluff with positive EV
+        raiseFreq = 10;
+      } else {
+        // Rarely bluff with bad hands and negative EV
+        raiseFreq = 3;
+      }
+      
+      raiseFreq = Math.max(0, Math.min(80, raiseFreq));
+      
+      breakdown.push({
+        action: actionName,
+        ev: raiseEV,
+        gtoFrequency: raiseFreq,
+        isOptimal: false
+      });
+    }
     
     // Find the action with highest EV and mark it as optimal
     const maxEV = Math.max(...breakdown.map(b => b.ev));
-    breakdown.forEach(item => {
-      item.isOptimal = item.ev === maxEV && item.ev > 0;
-    });
+    
+    // Special handling for preflop decisions
+    if (state.street === 'preflop' && toCall > 0) {
+      // For weak hands where all EVs are negative, fold is optimal
+      if (maxEV <= 0 && baseEquity < 0.30) {
+        breakdown.forEach(item => {
+          item.isOptimal = item.action === 'fold';
+        });
+      } else {
+        // Mark the action(s) with the highest EV as optimal
+        // Only mark as optimal if it's clearly the best (not just tied at 0)
+        breakdown.forEach(item => {
+          if (maxEV === 0) {
+            // If max EV is 0, only fold should be marked optimal
+            item.isOptimal = item.action === 'fold' && item.ev === 0;
+          } else {
+            // Mark as optimal if within 0.01 BB of the best EV
+            item.isOptimal = Math.abs(item.ev - maxEV) < 0.01;
+          }
+        });
+      }
+    } else {
+      // Postflop or other situations
+      breakdown.forEach(item => {
+        item.isOptimal = Math.abs(item.ev - maxEV) < 0.01;
+      });
+    }
     
     return breakdown;
   };
@@ -528,7 +777,7 @@ export default function PracticeGame({ playerName = "Player" }: { playerName?: s
                     <div className="absolute top-[25%] left-1/2 -translate-x-1/2 z-20">
                       <div className="px-6 py-3 bg-gradient-to-b from-gray-900 to-black rounded-xl border border-yellow-600/50 shadow-xl">
                         <div className="text-xs text-yellow-500 uppercase tracking-wider mb-1">Total Pot</div>
-                        <div className="text-3xl font-bold text-yellow-400">${pot.toFixed(2)}</div>
+                        <div className="text-3xl font-bold text-yellow-400">${(pot || 0).toFixed(2)}</div>
                       </div>
                     </div>
 
@@ -552,17 +801,17 @@ export default function PracticeGame({ playerName = "Player" }: { playerName?: s
                       ))}
                     </div>
 
-                    {/* Dealer Button */}
+                    {/* Dealer Button - positioned near Hero (bottom) */}
                     {players.length > 0 && (
-                      <div className="absolute top-[70%] left-[20%] w-8 h-8 bg-white rounded-full flex items-center justify-center text-xs font-bold text-black shadow-lg">
+                      <div className="absolute bottom-[15%] left-[45%] w-8 h-8 bg-white rounded-full flex items-center justify-center text-xs font-bold text-black shadow-lg">
                         D
                       </div>
                     )}
                   </div>
 
                   {/* Players positioned around the table */}
-                  {/* Top Left Player (Bot 1 - BB) */}
-                  {players[2] && (
+                  {/* Top Left Player (GTO Bot 1 - SB) */}
+                  {players[1] && (
                     <div className="absolute top-8 left-8">
                       <div className="flex flex-col items-center">
                         <div className="flex gap-1 mb-2">
@@ -571,6 +820,27 @@ export default function PracticeGame({ playerName = "Player" }: { playerName?: s
                         </div>
                         <div className="w-20 h-20 rounded-full bg-gradient-to-br from-purple-900 to-purple-950 border-2 border-purple-600 flex items-center justify-center mb-2 shadow-xl">
                           <Brain className="w-10 h-10 text-purple-400" />
+                        </div>
+                        <div className="text-sm font-semibold">{players[1].name}</div>
+                        <div className="text-xs text-yellow-500 font-bold">SB</div>
+                        <div className="text-sm text-gray-400">${players[1].stack.toFixed(2)}</div>
+                        {players[1].hasFolded && (
+                          <div className="text-xs text-red-500 mt-1">FOLDED</div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Top Right Player (GTO Bot 2 - BB) */}
+                  {players[2] && (
+                    <div className="absolute top-8 right-8">
+                      <div className="flex flex-col items-center">
+                        <div className="flex gap-1 mb-2">
+                          <div className="w-10 h-14 rounded bg-gradient-to-br from-blue-900 to-blue-950 border border-blue-700 shadow-lg" />
+                          <div className="w-10 h-14 rounded bg-gradient-to-br from-blue-900 to-blue-950 border border-blue-700 shadow-lg" />
+                        </div>
+                        <div className="w-20 h-20 rounded-full bg-gradient-to-br from-indigo-900 to-indigo-950 border-2 border-indigo-600 flex items-center justify-center mb-2 shadow-xl">
+                          <Brain className="w-10 h-10 text-indigo-400" />
                         </div>
                         <div className="text-sm font-semibold">{players[2].name}</div>
                         <div className="text-xs text-yellow-500 font-bold">BB</div>
@@ -582,38 +852,17 @@ export default function PracticeGame({ playerName = "Player" }: { playerName?: s
                     </div>
                   )}
 
-                  {/* Top Right Player (Bot 2 - BTN/Dealer) */}
-                  {players[0] && (
-                    <div className="absolute top-8 right-8">
-                      <div className="flex flex-col items-center">
-                        <div className="flex gap-1 mb-2">
-                          <div className="w-10 h-14 rounded bg-gradient-to-br from-blue-900 to-blue-950 border border-blue-700 shadow-lg" />
-                          <div className="w-10 h-14 rounded bg-gradient-to-br from-blue-900 to-blue-950 border border-blue-700 shadow-lg" />
-                        </div>
-                        <div className="w-20 h-20 rounded-full bg-gradient-to-br from-indigo-900 to-indigo-950 border-2 border-indigo-600 flex items-center justify-center mb-2 shadow-xl">
-                          <Brain className="w-10 h-10 text-indigo-400" />
-                        </div>
-                        <div className="text-sm font-semibold">{players[0].name}</div>
-                        <div className="text-xs text-yellow-500 font-bold">BTN</div>
-                        <div className="text-sm text-gray-400">${players[0].stack.toFixed(2)}</div>
-                        {players[0].hasFolded && (
-                          <div className="text-xs text-red-500 mt-1">FOLDED</div>
-                        )}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Bottom Player (Hero - SB) - positioned below the table */}
-                  {players[1] && (
+                  {/* Bottom Player (Hero - BTN/Dealer) - positioned below the table */}
+                  {players[0] && players[0].isHero && (
                     <div className="absolute -bottom-32 left-1/2 -translate-x-1/2">
                       <div className="flex flex-col items-center">
                         <div className="w-20 h-20 rounded-full bg-gradient-to-br from-green-900 to-green-950 border-3 border-green-500 flex items-center justify-center mb-2 shadow-xl">
                           <User className="w-10 h-10 text-green-400" />
                         </div>
-                        <div className="text-sm font-semibold text-green-400">{players[1].name}</div>
-                        <div className="text-xs text-yellow-500 font-bold">SB</div>
-                        <div className="text-sm text-gray-400">${players[1].stack.toFixed(2)}</div>
-                        {players[1].hasFolded && (
+                        <div className="text-sm font-semibold text-green-400">{players[0].name}</div>
+                        <div className="text-xs text-yellow-500 font-bold">BTN</div>
+                        <div className="text-sm text-gray-400">${players[0].stack.toFixed(2)}</div>
+                        {players[0].hasFolded && (
                           <div className="text-xs text-red-500 mt-1">FOLDED</div>
                         )}
                         <div className="flex gap-2 mt-3">
@@ -730,7 +979,10 @@ export default function PracticeGame({ playerName = "Player" }: { playerName?: s
                     {selectedAction === 'raise' && (
                       <div className="flex items-center justify-center gap-3 p-4 bg-black/50 rounded-lg">
                         <button
-                          onClick={() => setBetAmount(Math.max(game.getState().currentBet * 2, betAmount - 1))}
+                          onClick={() => {
+                            const minRaise = game.getState().currentBet * 2;
+                            setBetAmount(Math.max(minRaise, betAmount - 1));
+                          }}
                           className="w-10 h-10 bg-gray-700 hover:bg-gray-600 rounded flex items-center justify-center"
                         >
                           <Minus className="w-5 h-5" />
@@ -756,19 +1008,30 @@ export default function PracticeGame({ playerName = "Player" }: { playerName?: s
                         {/* Quick bet buttons */}
                         <div className="flex gap-2 ml-4">
                           <button
-                            onClick={() => setBetAmount(pot * 0.33)}
+                            onClick={() => {
+                              const minRaise = game.getState().currentBet * 2 || 2;
+                              const thirtyThree = pot * 0.33;
+                              setBetAmount(Math.max(minRaise, thirtyThree));
+                            }}
                             className="px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded text-sm"
                           >
                             33%
                           </button>
                           <button
-                            onClick={() => setBetAmount(pot * 0.66)}
+                            onClick={() => {
+                              const minRaise = game.getState().currentBet * 2 || 2;
+                              const sixtySix = pot * 0.66;
+                              setBetAmount(Math.max(minRaise, sixtySix));
+                            }}
                             className="px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded text-sm"
                           >
                             66%
                           </button>
                           <button
-                            onClick={() => setBetAmount(pot)}
+                            onClick={() => {
+                              const minRaise = game.getState().currentBet * 2 || 2;
+                              setBetAmount(Math.max(minRaise, pot));
+                            }}
                             className="px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded text-sm"
                           >
                             POT
