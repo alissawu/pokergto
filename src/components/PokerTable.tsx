@@ -30,8 +30,8 @@ export default function PokerTable() {
               {gameSettings.blinds}
             </div>
             <div className="text-sm text-gray-400">
-              <span className="text-white font-medium">Format:</span>{" "}
-              3-Handed GTO
+              <span className="text-white font-medium">Format:</span> 3-Handed
+              GTO
             </div>
           </div>
 
@@ -73,9 +73,7 @@ export default function PokerTable() {
             </div>
 
             <div>
-              <label className="text-xs text-gray-400 block mb-1">
-                Blinds
-              </label>
+              <label className="text-xs text-gray-400 block mb-1">Blinds</label>
               <select
                 value={gameSettings.blinds}
                 onChange={(e) =>
@@ -94,9 +92,7 @@ export default function PokerTable() {
             </div>
 
             <div>
-              <label className="text-xs text-gray-400 block mb-1">
-                Speed
-              </label>
+              <label className="text-xs text-gray-400 block mb-1">Speed</label>
               <select
                 value={gameSettings.speed}
                 onChange={(e) =>
@@ -138,7 +134,11 @@ export default function PokerTable() {
       <div className="flex-1 flex flex-col items-center justify-center">
         <div className="relative w-full max-w-4xl mx-auto">
           {/* Poker Table */}
-          <div className="relative aspect-[16/10] w-full">
+          <div
+            className={
+              "relative aspect-[16/10] w-full mb-[200px] -translate-y-5"
+            }
+          >
             {/* Table Felt */}
             <div className="absolute inset-0 flex items-center justify-center">
               <div className="relative w-full h-[70%]">
@@ -150,12 +150,12 @@ export default function PokerTable() {
             </div>
 
             {/* Players */}
-            <Player position="top-left" label="BB" stack={100} isBot />
-            <Player position="top-right" label="BTN" stack={100} isBot />
+            <Player position="top-left" label="BTN" stack={100} isBot />
+            <Player position="top-right" label="BB" stack={100} isBot />
             <Player position="bottom" label="SB (You)" stack={100} isHero />
 
             {/* Dealer Button */}
-            <div className="absolute right-[28%] top-[35%] w-8 h-8 rounded-full bg-white text-black font-bold grid place-items-center shadow-lg text-sm">
+            <div className="absolute left-[28%] top-[35%] w-8 h-8 rounded-full bg-white text-black font-bold grid place-items-center shadow-lg text-sm">
               D
             </div>
 
@@ -230,7 +230,14 @@ function Player({
 
   return (
     <div className={`absolute ${positionStyles[position]}`}>
-      <div className="flex flex-col items-center gap-2">
+      {/* Hero = row (avatar + info + cards on the right). Bots = original column. */}
+      <div
+        className={
+          isHero
+            ? "flex flex-row items-center gap-3"
+            : "flex flex-col items-center gap-2"
+        }
+      >
         {/* Avatar */}
         <div
           className={`w-16 h-16 rounded-full border-2 ${
@@ -244,17 +251,17 @@ function Player({
           </div>
         </div>
 
-        {/* Player Info */}
-        <div className="text-center">
-          <div className="text-xs font-semibold text-white px-2 py-1 bg-black/60 rounded">
+        {/* Info */}
+        <div className={isHero ? "text-left" : "text-center"}>
+          <div className="text-xs font-semibold text-white px-2 py-1 bg-black/60 rounded inline-block">
             {label}
           </div>
           <div className="text-xs text-gray-400 mt-1">${stack}.00</div>
         </div>
 
-        {/* Player Cards */}
+        {/* Hero Cards — to the right of avatar/info */}
         {isHero && (
-          <div className="flex gap-1 mt-1">
+          <div className="flex gap-1 ml-2">
             <div className="w-10 h-14 rounded bg-white border border-gray-300 flex items-center justify-center text-2xl">
               A♠
             </div>
@@ -268,7 +275,7 @@ function Player({
   );
 }
 
-function Card({ revealed = false }: { revealed?: boolean }) {
+function Card({ revealed = false, card }: { revealed?: boolean; card?: string }) {
   return (
     <div
       className={`w-14 h-20 rounded-lg border ${
@@ -277,7 +284,11 @@ function Card({ revealed = false }: { revealed?: boolean }) {
           : "bg-gradient-to-br from-blue-900 to-blue-950 border-blue-800"
       } shadow-lg`}
     >
-      {revealed && "A♠"}
+      {revealed && card && (
+        <span className={card.includes('♥') || card.includes('♦') ? 'text-red-500' : 'text-black'}>
+          {card}
+        </span>
+      )}
     </div>
   );
 }

@@ -1,59 +1,56 @@
 /**
  * Monte Carlo Tree Search (MCTS) for Poker
- * 
- * MCTS is used in:
- * - AlphaGo/AlphaZero (for Go/Chess)
- * - Pluribus (multiplayer poker)
- * - Real-time poker decision making
- * 
- * This implementation shows understanding of:
  * - UCB1 (Upper Confidence Bound)
  * - Information Set MCTS (IS-MCTS) for imperfect information
- * - Progressive widening for large action spaces
- * - RAVE (Rapid Action Value Estimation)
+ * - Optional PUCT / RAVE hooks
  */
 
-import { Card, Action, GameState } from '../engine';
+import { Card, Action, GameState } from "../engine";
+import {
+  bestOf7,
+  fullDeck,
+  removeCards,
+  shuffleInPlace,
+  compareScore,
+} from "./eval";
 
 /**
  * MCTS Node for poker
  * Handles imperfect information through information sets
  */
 export interface MCTSNode {
-  infoSet: string;           // Information set identifier
-  visits: number;            // Number of times visited
-  totalReward: number;       // Cumulative reward
+  infoSet: string; // Information set identifier
+  visits: number; // Number of times visited
+  totalReward: number; // Cumulative reward (from hero perspective)
   children: Map<Action, MCTSNode>;
   parent: MCTSNode | null;
-  action: Action | null;     // Action that led to this node
+  action: Action | null; // Action that led to this node
   availableActions: Action[];
-  player: number;
-  
-  // IS-MCTS specific
-  reachProbabilities: Map<string, number>; // Probability of reaching this node with each possible hand
-  privateCards?: Card[];     // Private cards if known
+  player: number; // 0 = hero, 1 = not-hero (for HU; extend for multiway)
+  // IS-MCTS specific (placeholders for future use)
+  reachProbabilities: Map<string, number>;
+  privateCards?: Card[];
 }
 
 /**
  * Configuration for MCTS
  */
 export interface MCTSConfig {
-  explorationConstant: number;  // C in UCB1 formula (typically √2)
-  simulationDepth: number;      // Max depth for rollouts
-  timeLimit: number;            // Milliseconds per decision
-  usePUCT: boolean;            // Use PUCT like AlphaZero
-  useRAVE: boolean;            // Use RAVE for faster convergence
-  progressiveWidening: boolean; // For large action spaces
+  explorationConstant: number; // C in UCB1 formula (typically √2)
+  simulationDepth: number; // Max depth for rollouts
+  timeLimit: number; // Milliseconds per decision
+  usePUCT: boolean; // Use PUCT like AlphaZero
+  useRAVE: boolean; // Use RAVE for faster convergence
+  progressiveWidening: boolean; // (Not wired by default in this minimal version)
 }
 
 /**
  * Information Set Monte Carlo Tree Search
- * This variant handles hidden information in poker
  */
 export class ISMCTS {
   private root: MCTSNode | null = null;
   private config: MCTSConfig;
-  
+
   constructor(config: Partial<MCTSConfig> = {}) {
     this.config = {
       explorationConstant: Math.sqrt(2),
@@ -61,309 +58,373 @@ export class ISMCTS {
       timeLimit: 1000,
       usePUCT: false,
       useRAVE: false,
-      progressiveWidening: true,
-      ...config
+      progressiveWidening: false,
+      ...config,
     };
   }
-  
+
   /**
    * Main MCTS search
    * Returns best action after running simulations
    */
   public search(gameState: GameState, iterations?: number): Action {
     const startTime = Date.now();
-    const maxIterations = iterations || Infinity;
+    const maxIterations = iterations ?? Infinity;
     let iter = 0;
-    
-    // Initialize root if needed
-    if (!this.root) {
-      this.root = this.createNode(gameState, null, null);
-    }
-    
-    // Run MCTS iterations
+
+    // Initialize root fresh for each decision point
+    this.root = this.createNode(gameState, null, null);
+
     while (
-      iter < maxIterations && 
+      iter < maxIterations &&
       Date.now() - startTime < this.config.timeLimit
     ) {
-      // Determinization - sample opponent's hidden cards
+      // Determinization - sample opponents' hidden cards from remaining deck
       const determinization = this.determinize(gameState);
-      
-      // Run one iteration of MCTS
+
+      // Run one iteration of MCTS (Selection -> Expansion -> Simulation -> Backprop)
       this.iterate(determinization, this.root);
-      
+
       iter++;
     }
-    
-    // Select best action based on visit count (most robust)
+
     return this.selectBestAction(this.root);
   }
-  
+
   /**
    * One iteration of MCTS
    * Selection -> Expansion -> Simulation -> Backpropagation
    */
   private iterate(gameState: GameState, node: MCTSNode): number {
-    // Terminal node - return utility
+    // If terminal, return terminal reward
     if (this.isTerminal(gameState)) {
       return this.evaluateTerminal(gameState);
     }
-    
-    // Selection phase - traverse tree using UCB1
+
+    // Selection (and Expansion when encountering a missing child)
     if (node.visits > 0 && node.children.size > 0) {
       const action = this.selectAction(node);
       let child = node.children.get(action);
-      
+
       if (!child) {
-        // Expansion phase - add new child
         const nextState = this.applyAction(gameState, action);
         child = this.createNode(nextState, node, action);
         node.children.set(action, child);
       }
-      
-      const reward = this.iterate(
-        this.applyAction(gameState, action),
-        child
-      );
-      
-      // Backpropagation phase
+
+      const reward = this.iterate(this.applyAction(gameState, action), child);
       this.backpropagate(node, reward);
       return reward;
     }
-    
-    // Leaf node - simulate
-    return this.simulate(gameState);
+
+    // Leaf node: expand all currently legal actions and simulate once
+    if (node.children.size === 0) {
+      for (const a of node.availableActions) {
+        // create child stubs to allow future selection branching
+        node.children.set(
+          a,
+          this.createNode(this.applyAction(gameState, a), node, a)
+        );
+      }
+    }
+
+    // Single rollout from this leaf
+    const reward = this.simulate(gameState);
+    this.backpropagate(node, reward);
+    return reward;
   }
-  
+
   /**
-   * UCB1 formula for action selection
-   * Balances exploration vs exploitation
+   * UCB1 / PUCT / RAVE selection
    */
   private selectAction(node: MCTSNode): Action {
     let bestAction: Action | null = null;
     let bestValue = -Infinity;
-    
-    const parentVisits = Math.log(node.visits);
-    
-    for (const action of node.availableActions) {
-      const child = node.children.get(action);
-      
+
+    const parentVisitsLog = Math.log(Math.max(1, node.visits));
+
+    for (const a of node.availableActions) {
+      const child = node.children.get(a);
       let value: number;
+
       if (!child || child.visits === 0) {
-        // Unvisited node - infinite UCB value
+        // Encourage trying unvisited actions
         value = Infinity;
       } else {
-        // UCB1 formula: exploitation + exploration
         const exploitation = child.totalReward / child.visits;
-        const exploration = this.config.explorationConstant * 
-                          Math.sqrt(parentVisits / child.visits);
-        
+        const exploration =
+          this.config.explorationConstant *
+          Math.sqrt(parentVisitsLog / child.visits);
+
         if (this.config.usePUCT) {
-          // PUCT formula (used in AlphaZero)
-          const prior = this.getPrior(action, node);
-          value = exploitation + 
-                 this.config.explorationConstant * prior * 
-                 Math.sqrt(parentVisits) / (1 + child.visits);
+          const prior = this.getPrior(a, node);
+          value =
+            exploitation +
+            (this.config.explorationConstant *
+              prior *
+              Math.sqrt(parentVisitsLog)) /
+              (1 + child.visits);
         } else if (this.config.useRAVE) {
-          // RAVE: Use all-moves-as-first heuristic
           value = this.calculateRAVE(child, node, exploitation, exploration);
         } else {
           value = exploitation + exploration;
         }
       }
-      
+
       if (value > bestValue) {
         bestValue = value;
-        bestAction = action;
+        bestAction = a;
       }
     }
-    
+
     return bestAction!;
   }
-  
+
   /**
-   * Progressive widening - gradually increase action space
-   * Important for continuous betting in no-limit poker
+   * Prior for PUCT (uniform by default).
+   * Plug in NN policy or heuristics here if you have them.
    */
-  private getAvailableActions(gameState: GameState, node: MCTSNode): Action[] {
-    if (!this.config.progressiveWidening) {
-      return this.getAllLegalActions(gameState);
-    }
-    
-    // Progressive widening formula
-    const k = 10; // Widening parameter
-    const alpha = 0.5; // Another widening parameter
-    const maxActions = Math.ceil(k * Math.pow(node.visits, alpha));
-    
-    const allActions = this.getAllLegalActions(gameState);
-    
-    if (allActions.length <= maxActions) {
-      return allActions;
-    }
-    
-    // Return subset of actions based on heuristic
-    return this.selectTopActions(allActions, maxActions, gameState);
+  private getPrior(action: Action, node: MCTSNode): number {
+    // Uniform prior
+    return 1 / Math.max(1, node.availableActions.length);
   }
-  
+
   /**
-   * Simulation (rollout) phase
-   * Play random game to terminal state
+   * Single playout (rollout) until terminal or depth cap
    */
   private simulate(gameState: GameState): number {
-    let state = { ...gameState };
+    let state = this.cloneState(gameState);
     let depth = 0;
-    
+
     while (!this.isTerminal(state) && depth < this.config.simulationDepth) {
-      // Use heuristic policy for better simulations
-      const action = this.rolloutPolicy(state);
+      const actions = this.getAllLegalActions(state);
+      const action =
+        Math.random() < 0.8
+          ? this.heuristicAction(state, actions)
+          : actions[Math.floor(Math.random() * actions.length)];
+
       state = this.applyAction(state, action);
       depth++;
     }
-    
+
     return this.evaluateTerminal(state);
   }
-  
+
   /**
-   * Rollout policy - can be random or use heuristics
-   * Better policy = better MCTS performance
+   * Very simple heuristic policy
+   * (You can plug strength-aware heuristics here later)
    */
-  private rolloutPolicy(gameState: GameState): Action {
-    const actions = this.getAllLegalActions(gameState);
-    
-    // Use simple heuristics for poker
-    if (Math.random() < 0.8) {
-      // 80% of time use heuristic
-      return this.heuristicAction(gameState, actions);
-    } else {
-      // 20% random for exploration
-      return actions[Math.floor(Math.random() * actions.length)];
-    }
+  private heuristicAction(_state: GameState, actions: Action[]): Action {
+    if (actions.includes("raise")) return "raise";
+    if (actions.includes("call")) return "call";
+    if (actions.includes("check")) return "check";
+    return "fold";
   }
-  
+
   /**
-   * Simple poker heuristics for rollout policy
-   */
-  private heuristicAction(gameState: GameState, actions: Action[]): Action {
-    // Simplified heuristics
-    const hand = this.evaluateHand(gameState);
-    
-    if (hand.strength > 0.8) {
-      // Strong hand - prefer betting/raising
-      if (actions.includes('raise')) return 'raise';
-      if (actions.includes('call')) return 'call';
-    } else if (hand.strength > 0.5) {
-      // Medium hand - prefer checking/calling
-      if (actions.includes('check')) return 'check';
-      if (actions.includes('call')) return 'call';
-    } else {
-      // Weak hand - prefer checking/folding
-      if (actions.includes('check')) return 'check';
-      if (actions.includes('fold')) return 'fold';
-    }
-    
-    // Default to first legal action
-    return actions[0];
-  }
-  
-  /**
-   * Backpropagation - update statistics up the tree
+   * Backpropagation
    */
   private backpropagate(node: MCTSNode, reward: number): void {
-    let current: MCTSNode | null = node;
-    
-    while (current) {
-      current.visits++;
-      current.totalReward += reward;
-      current = current.parent;
+    let cur: MCTSNode | null = node;
+    while (cur) {
+      cur.visits++;
+      cur.totalReward += reward;
+      cur = cur.parent;
     }
   }
-  
+
   /**
-   * RAVE (Rapid Action Value Estimation)
-   * Uses all-moves-as-first heuristic for faster convergence
+   * RAVE (placeholder blend with UCB)
    */
   private calculateRAVE(
     child: MCTSNode,
-    parent: MCTSNode,
+    _parent: MCTSNode,
     exploitation: number,
     exploration: number
   ): number {
-    // RAVE statistics
     const raveVisits = this.getRaveVisits(child);
     const raveReward = this.getRaveReward(child);
-    
-    if (raveVisits === 0) {
-      return exploitation + exploration;
-    }
-    
-    // RAVE value
+    if (raveVisits === 0) return exploitation + exploration;
     const raveValue = raveReward / raveVisits;
-    
-    // Blend RAVE with UCB using decreasing weight
     const beta = Math.sqrt(500 / (500 + child.visits));
-    
     return (1 - beta) * (exploitation + exploration) + beta * raveValue;
   }
-  
+
   /**
    * Determinization for IS-MCTS
-   * Sample possible opponent hands
+   * Sample possible opponent hands from a FULL remaining deck
    */
   private determinize(gameState: GameState): GameState {
-    // Create a copy of game state
-    const determinized = { ...gameState };
-    
-    // Sample opponent's hidden cards from remaining deck
-    const deck = this.getRemainingDeck(gameState);
-    const shuffled = this.shuffle(deck);
-    
-    // Assign cards to opponents
-    let cardIndex = 0;
-    for (const player of determinized.players) {
-      if (!player.isHero && player.cards.length === 0) {
-        player.cards = [
-          shuffled[cardIndex++],
-          shuffled[cardIndex++]
-        ] as [Card, Card];
+    const det = this.cloneState(gameState);
+
+    // Known cards: all currently visible (board + any known hole cards)
+    const known: Card[] = [
+      ...det.board,
+      ...det.players.flatMap((p) => p.cards ?? []),
+    ];
+
+    // Remaining deck = full deck minus known
+    let deck = removeCards(fullDeck(), known);
+    shuffleInPlace(deck);
+
+    // Assign two hidden cards to any non-hero with empty/unknown cards
+    for (const p of det.players) {
+      if (!p.isHero && (!p.cards || p.cards.length === 0)) {
+        p.cards = [deck.pop()!, deck.pop()!] as [Card, Card];
       }
     }
-    
-    return determinized;
+
+    return det;
   }
-  
+
   /**
-   * Select best action after search completes
+   * Terminal check (very simplified)
+   * Terminal when:
+   *  - Only one player remains (others folded), OR
+   *  - River street and betting is complete (showdown)
    */
-  private selectBestAction(root: MCTSNode): Action {
-    let bestAction: Action | null = null;
-    let bestVisits = -1;
-    
-    for (const [action, child] of root.children) {
-      // Most visited = most robust choice
-      if (child.visits > bestVisits) {
-        bestVisits = child.visits;
-        bestAction = action;
+  private isTerminal(state: GameState): boolean {
+    const active = state.players.filter((p) => !p.hasFolded);
+    if (active.length <= 1) return true;
+    return state.street === "river" && this.isBettingComplete(state);
+  }
+
+  private isBettingComplete(state: GameState): boolean {
+    const active = state.players.filter((p) => !p.hasFolded);
+    return active.every(
+      (p) => p.currentBet === state.currentBet || p.stack === 0
+    );
+  }
+
+  /**
+   * Proper showdown evaluation using bestOf7 (HU assumption)
+   * Returns chip EV from hero's perspective:
+   *  - win:  pot - heroInvested
+   *  - lose: -heroInvested
+   *  - tie:  pot/2 - heroInvested
+   *
+   * NOTE: For multiway & side-pots you should extend this logic.
+   */
+  private evaluateTerminal(state: GameState): number {
+    const hero = state.players.find((p) => p.isHero)!;
+
+    // If hero folded, loses what they invested
+    if (hero.hasFolded) {
+      return -hero.totalInvested;
+    }
+
+    // If everyone else folded, hero wins the pot
+    const active = state.players.filter((p) => !p.hasFolded);
+    if (active.length === 1 && active[0].isHero) {
+      return state.pot - hero.totalInvested;
+    }
+
+    // If not at showdown yet (e.g., all-in earlier without board complete),
+    // you can add board-rollout equities. For now, treat as neutral.
+    if (state.street !== "river" || !this.isBettingComplete(state)) {
+      return 0;
+    }
+
+    // Heads-up showdown (extend to multiway as needed)
+    const villain = state.players.find((p) => !p.isHero && !p.hasFolded);
+    if (!villain) {
+      // Fallback: if somehow no opponent detected, treat as hero win
+      return state.pot - hero.totalInvested;
+    }
+
+    const hero7 = [...hero.cards, ...state.board] as Card[];
+    const vill7 = [...villain.cards, ...state.board] as Card[];
+
+    const hScore = bestOf7(hero7);
+    const vScore = bestOf7(vill7);
+    const cmp = compareScore(hScore, vScore);
+
+    if (cmp > 0) return state.pot - hero.totalInvested; // hero wins
+    if (cmp < 0) return -hero.totalInvested; // hero loses
+    return state.pot / 2 - hero.totalInvested; // split
+  }
+
+  /**
+   * Generate legal actions (very simplified)
+   * Assumes discrete actions: fold, check/call, raise (pot*0.75 sizing)
+   */
+  private getAllLegalActions(state: GameState): Action[] {
+    const actions: Action[] = ["fold"];
+    const me = state.players.find((p) => p.id === state.actionOn)!;
+
+    if (state.currentBet === me.currentBet) actions.push("check");
+    else actions.push("call");
+
+    const toCall = state.currentBet - me.currentBet;
+    if (me.stack > toCall) actions.push("raise");
+
+    return actions;
+  }
+
+  /**
+   * Apply action to a cloned state (very simplified, no side-pots, etc.)
+   */
+  private applyAction(state: GameState, action: Action): GameState {
+    const s = this.cloneState(state);
+    const p = s.players.find((pl) => pl.id === s.actionOn)!;
+
+    switch (action) {
+      case "fold": {
+        p.hasFolded = true;
+        break;
+      }
+      case "check": {
+        // nothing
+        break;
+      }
+      case "call": {
+        const toCall = s.currentBet - p.currentBet;
+        const amt = Math.max(0, Math.min(p.stack, toCall));
+        p.stack -= amt;
+        p.currentBet += amt;
+        p.totalInvested += amt;
+        s.pot += amt;
+        break;
+      }
+      case "raise": {
+        const toCall = s.currentBet - p.currentBet;
+        const raiseAmount = Math.max(1, Math.floor(s.pot * 0.75));
+        const totalPut = toCall + raiseAmount;
+        const amt = Math.max(0, Math.min(p.stack, totalPut));
+        p.stack -= amt;
+        p.currentBet += amt;
+        p.totalInvested += amt;
+        s.pot += amt;
+        s.currentBet = p.currentBet;
+        break;
       }
     }
-    
-    // Log statistics for debugging
-    console.log('MCTS Statistics:');
-    for (const [action, child] of root.children) {
-      const avgReward = child.visits > 0 ? child.totalReward / child.visits : 0;
-      console.log(`  ${action}: visits=${child.visits}, avg=${avgReward.toFixed(3)}`);
-    }
-    
-    return bestAction!;
+
+    this.advanceTurn(s);
+    return s;
   }
-  
-  // Helper methods
+
+  /**
+   * Advance action to next player (table order assumed to be array order)
+   * (Street advancement, blinds, min-raises, etc. should be handled in your engine.)
+   */
+  private advanceTurn(s: GameState): void {
+    const i = s.players.findIndex((pl) => pl.id === s.actionOn);
+    const next = (i + 1) % s.players.length;
+    s.actionOn = s.players[next].id;
+  }
+
+  /**
+   * Create a node for the current state
+   */
   private createNode(
-    gameState: GameState,
+    state: GameState,
     parent: MCTSNode | null,
     action: Action | null
   ): MCTSNode {
-    const infoSet = this.getInfoSet(gameState);
-    const player = this.getCurrentPlayer(gameState);
-    
+    const infoSet = this.getInfoSet(state);
+    const player = this.getCurrentPlayerIndex(state);
+
     return {
       infoSet,
       visits: 0,
@@ -371,161 +432,61 @@ export class ISMCTS {
       children: new Map(),
       parent,
       action,
-      availableActions: this.getAllLegalActions(gameState),
+      availableActions: this.getAllLegalActions(state),
       player,
       reachProbabilities: new Map(),
     };
   }
-  
-  private getInfoSet(gameState: GameState): string {
-    // Create unique identifier for information set
-    // Includes visible information but not opponent's hidden cards
-    const hero = gameState.players.find(p => p.isHero)!;
-    return `${hero.cards.join('')}-${gameState.board.join('')}-${gameState.history.map(h => h.action).join('')}`;
+
+  /**
+   * Info set key: only include public info + hero private info
+   * (Avoid including opponents' unknown hole cards!)
+   */
+  private getInfoSet(state: GameState): string {
+    const hero = state.players.find((p) => p.isHero)!;
+    const heroCards = hero.cards?.join("") ?? "";
+    const board = state.board.join("");
+    const history = state.history?.map((h: any) => h.action).join("") ?? "";
+    const pot = state.pot;
+    const bet = state.currentBet;
+    return `${heroCards}|${board}|${history}|pot${pot}|bet${bet}|on:${state.actionOn}`;
   }
-  
-  private getCurrentPlayer(gameState: GameState): number {
-    const activePlayer = gameState.players.find(p => p.id === gameState.actionOn);
-    return activePlayer?.isHero ? 0 : 1;
+
+  private getCurrentPlayerIndex(state: GameState): number {
+    const active = state.players.find((p) => p.id === state.actionOn);
+    return active?.isHero ? 0 : 1;
   }
-  
-  private isTerminal(gameState: GameState): boolean {
-    // Game ends when only one player remains or showdown
-    const activePlayers = gameState.players.filter(p => !p.hasFolded);
-    return activePlayers.length === 1 || 
-           (gameState.street === 'river' && this.isBettingComplete(gameState));
-  }
-  
-  private isBettingComplete(gameState: GameState): boolean {
-    const activePlayers = gameState.players.filter(p => !p.hasFolded);
-    return activePlayers.every(p => 
-      p.currentBet === gameState.currentBet || p.stack === 0
-    );
-  }
-  
-  private evaluateTerminal(gameState: GameState): number {
-    // Return reward from hero's perspective
-    const hero = gameState.players.find(p => p.isHero)!;
-    
-    if (hero.hasFolded) {
-      return -hero.totalInvested;
+
+  private selectBestAction(root: MCTSNode): Action {
+    let best: Action | null = null;
+    let mostVisits = -1;
+
+    for (const [a, child] of root.children) {
+      if (child.visits > mostVisits) {
+        mostVisits = child.visits;
+        best = a;
+      }
     }
-    
-    const activePlayers = gameState.players.filter(p => !p.hasFolded);
-    if (activePlayers.length === 1) {
-      return gameState.pot - hero.totalInvested;
-    }
-    
-    // Showdown - simplified
-    return Math.random() < 0.5 ? gameState.pot - hero.totalInvested : -hero.totalInvested;
+
+    // Debug dump (optional)
+    // for (const [a, child] of root.children) {
+    //   const avg = child.visits ? child.totalReward / child.visits : 0;
+    //   console.log(`${a}: visits=${child.visits}, avg=${avg.toFixed(3)}`);
+    // }
+
+    return best!;
   }
-  
-  private getAllLegalActions(gameState: GameState): Action[] {
-    // Simplified - would use game engine in production
-    const actions: Action[] = ['fold'];
-    
-    const currentPlayer = gameState.players.find(p => p.id === gameState.actionOn)!;
-    if (gameState.currentBet === currentPlayer.currentBet) {
-      actions.push('check');
-    } else {
-      actions.push('call');
-    }
-    
-    if (currentPlayer.stack > gameState.currentBet - currentPlayer.currentBet) {
-      actions.push('raise');
-    }
-    
-    return actions;
-  }
-  
-  private applyAction(gameState: GameState, action: Action): GameState {
-    // Apply action to game state - would use game engine
-    const newState = JSON.parse(JSON.stringify(gameState)); // Deep copy
-    
-    // Simplified action application
-    const player = newState.players.find((p: any) => p.id === newState.actionOn)!;
-    
-    switch (action) {
-      case 'fold':
-        player.hasFolded = true;
-        break;
-      case 'call':
-        const toCall = newState.currentBet - player.currentBet;
-        player.stack -= toCall;
-        player.currentBet = newState.currentBet;
-        player.totalInvested += toCall;
-        newState.pot += toCall;
-        break;
-      case 'check':
-        // No change
-        break;
-      case 'raise':
-        const raiseAmount = newState.pot * 0.75; // 75% pot bet
-        player.stack -= raiseAmount;
-        player.currentBet += raiseAmount;
-        player.totalInvested += raiseAmount;
-        newState.pot += raiseAmount;
-        newState.currentBet = player.currentBet;
-        break;
-    }
-    
-    // Move to next player
-    this.advanceGame(newState);
-    
-    return newState;
-  }
-  
-  private advanceGame(gameState: GameState): void {
-    // Simplified game advancement
-    const currentIndex = gameState.players.findIndex((p: any) => p.id === gameState.actionOn);
-    const nextIndex = (currentIndex + 1) % gameState.players.length;
-    gameState.actionOn = gameState.players[nextIndex].id;
-  }
-  
-  private selectTopActions(actions: Action[], maxActions: number, gameState: GameState): Action[] {
-    // Select best actions based on heuristic
-    // In production, might use neural network or hand strength
-    return actions.slice(0, maxActions);
-  }
-  
-  private getPrior(action: Action, node: MCTSNode): number {
-    // Prior probability for PUCT
-    // Could use neural network like AlphaZero
-    return 1.0 / node.availableActions.length;
-  }
-  
+
+  // RAVE placeholders (no AMAF tables here; you can wire them later)
   private getRaveVisits(node: MCTSNode): number {
-    // Get RAVE visit count
-    // Simplified - would track AMAF statistics
     return node.visits;
   }
-  
   private getRaveReward(node: MCTSNode): number {
-    // Get RAVE reward
-    // Simplified - would track AMAF statistics
     return node.totalReward;
   }
-  
-  private evaluateHand(gameState: GameState): { strength: number } {
-    // Evaluate current hand strength
-    // Simplified - would use real hand evaluator
-    return { strength: Math.random() };
-  }
-  
-  private getRemainingDeck(gameState: GameState): Card[] {
-    // Get cards not yet seen
-    // Simplified for example
-    const allCards: Card[] = ['A♠', 'K♠', 'Q♠', 'J♠'] as Card[];
-    return allCards;
-  }
-  
-  private shuffle<T>(array: T[]): T[] {
-    const shuffled = [...array];
-    for (let i = shuffled.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
-    }
-    return shuffled;
+
+  private cloneState<T>(obj: T): T {
+    return JSON.parse(JSON.stringify(obj));
   }
 }
 
