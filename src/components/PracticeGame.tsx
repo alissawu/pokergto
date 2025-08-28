@@ -748,11 +748,18 @@ export default function PracticeGame({
       });
     }
 
-    // Mark the action(s) with highest EV as optimal
+    // Mark only the single highest EV action as optimal
     const maxEV = Math.max(...breakdown.map((b) => b.ev));
     breakdown.forEach((item) => {
-      item.isOptimal = Math.abs(item.ev - maxEV) < 0.001;
+      item.isOptimal = false; // Reset all first
     });
+    // Find and mark only the highest EV action
+    const bestAction = breakdown.find(
+      (item) => Math.abs(item.ev - maxEV) < 0.001
+    );
+    if (bestAction) {
+      bestAction.isOptimal = true;
+    }
 
     const totalFreq = breakdown.reduce(
       (sum, item) => sum + item.gtoFrequency,
@@ -810,17 +817,15 @@ export default function PracticeGame({
             </div>
           </div>
 
-          <button
-            onClick={startNewHand}
-            className="px-4 py-2 bg-gradient-to-r from-green-600 to-green-700 hover:from-green-700 hover:to-green-800 rounded-lg font-semibold flex items-center gap-2 transition-all"
-          >
-            {gameStarted ? (
+          {gameStarted && (
+            <button
+              onClick={startNewHand}
+              className="px-4 py-2 bg-gradient-to-r from-green-600 to-green-700 hover:from-green-700 hover:to-green-800 rounded-lg font-semibold flex items-center gap-2"
+            >
               <RotateCcw className="w-4 h-4" />
-            ) : (
-              <Play className="w-5 h-5" />
-            )}
-            {gameStarted ? "New Hand" : "Start Playing"}
-          </button>
+              New Hand
+            </button>
+          )}
         </div>
       </div>
 
@@ -835,13 +840,17 @@ export default function PracticeGame({
                 Play against two GTO bots that use real game theory algorithms
                 including CFR and MCTS
               </p>
-              <button
-                onClick={startNewHand}
-                className="px-8 py-3 bg-gradient-to-r from-green-600 to-green-700 hover:from-green-700 hover:to-green-800 rounded-xl font-bold text-lg flex items-center gap-3 mx-auto transition-all transform hover:scale-105"
-              >
-                <Play className="w-6 h-6" />
-                Start First Hand
-              </button>
+              <div className="flex justify-center">
+                <button
+                  onClick={startNewHand}
+                  className="!px-10 !py-2 bg-gradient-to-r from-green-600 to-green-700 
+                hover:from-green-700 hover:to-green-800 rounded-xl 
+                font-bold text-base flex items-center gap-2"
+                >
+                  <Play />
+                  Start First Hand
+                </button>
+              </div>
             </div>
           ) : (
             <div className="w-full max-w-6xl mx-auto">

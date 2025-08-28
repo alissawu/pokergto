@@ -425,15 +425,63 @@ export class RealTimeGTOSolver {
     fullStrategy: Map<Action, number>
   ): number {
     const hero = state.players.find((p) => p.id === heroId)!;
-    const gameTree = this.treeBuilder.buildTree(state, heroId, 2);
-
-    // Simplified EV calculation
-    const childNode = gameTree.root.children.get(action);
-    if (!childNode || !childNode.utility) {
-      return 0;
+    const toCall = state.currentBet - hero.currentBet;
+    
+    // Quick EV estimates based on action and equity
+    if (action === "fold") {
+      return -hero.totalInvested;
     }
-
-    return childNode.utility[0];
+    
+    // Estimate hand strength/equity
+    const equity = this.estimateHandEquity(hero);
+    
+    if (action === "call") {
+      // EV = equity * (pot + call) - call amount
+      return equity * (state.pot + toCall) - toCall;
+    }
+    
+    if (action === "check") {
+      // EV = equity * pot
+      return equity * state.pot;
+    }
+    
+    if (action === "bet" || action === "raise") {
+      // Simplified: assume some fold equity + showdown equity
+      const betSize = action === "raise" 
+        ? Math.max(state.currentBet * 2 - hero.currentBet, toCall * 2)
+        : state.pot * 0.66;
+      const foldEquity = 0.3; // Estimate 30% fold equity
+      const showdownWinnings = equity * (state.pot + betSize * 2);
+      return foldEquity * state.pot + (1 - foldEquity) * (showdownWinnings - betSize);
+    }
+    
+    return 0;
+  }
+  
+  private estimateHandEquity(player: Player): number {
+    if (!player.cards || player.cards.length !== 2) return 0.33;
+    const handBucket = this.treeBuilder["getHandBucket"](player.cards as [Card, Card]);
+    const bucketEquities: Record<string, number> = {
+      premium_pair: 0.8,
+      high_pair: 0.65,
+      mid_pair: 0.55,
+      low_pair: 0.45,
+      premium_suited: 0.6,
+      premium_offsuit: 0.55,
+      broadway_suited: 0.5,
+      broadway_offsuit: 0.45,
+      good_suited: 0.45,
+      suited_connector: 0.4,
+      decent_suited: 0.38,
+      decent_offsuit: 0.35,
+      speculative_suited: 0.35,
+      mediocre_offsuit: 0.32,
+      weak_suited: 0.3,
+      weak_offsuit: 0.25,
+      trash: 0.2,
+      unknown: 0.33,
+    };
+    return bucketEquities[handBucket] || 0.33;
   }
 
   private createInfoSet(state: GameState, player: Player): string {

@@ -73,19 +73,19 @@ interface SidebarProps {
   onToggle?: () => void;
 }
 
-export default function Sidebar({ userName, isCollapsed = false, onToggle }: SidebarProps) {
+export default function Sidebar({
+  userName,
+  isCollapsed = false,
+  onToggle,
+}: SidebarProps) {
   const [active, setActive] = useState<Section>("curriculum");
   const pathname = usePathname();
-  const userParam = userName ? `?name=${encodeURIComponent(userName)}` : '';
+  const userParam = userName ? `?name=${encodeURIComponent(userName)}` : "";
 
   if (isCollapsed) {
     return (
       <div className="w-[var(--sidebar-rail-w)] h-full sidebar-surface border-r border-white/10 flex flex-col items-center gap-3 py-4 flex-shrink-0">
-        <button
-          onClick={onToggle}
-          className="rail-btn"
-          title="Expand"
-        >
+        <button onClick={onToggle} className="rail-btn" title="Expand">
           <ChevronLeft className="w-4 h-4 rotate-180" />
         </button>
         <button
@@ -118,101 +118,107 @@ export default function Sidebar({ userName, isCollapsed = false, onToggle }: Sid
     <>
       {/* Backdrop for mobile */}
       {!isCollapsed && (
-        <div 
+        <div
           className="fixed inset-0 bg-black/50 z-40 lg:hidden"
           onClick={onToggle}
         />
       )}
-      
+
       {/* Sidebar */}
-      <div className={`${isCollapsed ? 'w-[var(--sidebar-rail-w)]' : 'w-[var(--sidebar-open-w)]'} h-full sidebar-surface border-r border-white/10 flex flex-col flex-shrink-0 relative z-50 transition-[width] duration-200 ease-out`}>
-      {/* Header */}
-      <div className="flex items-center justify-between px-4 pl-[10px] h-[50px] border-b border-white/10">
-        <div className="text-sm tracking-widest text-gray-400 uppercase">
-          Menu
+      <div
+        className={`${
+          isCollapsed
+            ? "w-[var(--sidebar-rail-w)]"
+            : "w-[var(--sidebar-open-w)]"
+        } h-full sidebar-surface border-r border-white/10 flex flex-col flex-shrink-0 relative z-50 transition-[width] duration-200 ease-out`}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between !pl-[10px] h-[50px] border-b border-white/10">
+          <div className="text-sm tracking-widest text-gray-400 uppercase">
+            Menu
+          </div>
+          <button
+            onClick={onToggle}
+            className="pl-3 hover:bg-white/10 rounded-md transition-colors"
+            title="Collapse"
+          >
+            <ChevronLeft className="w-4 h-4" />
+          </button>
         </div>
-        <button
-          onClick={onToggle}
-          className="p-1.5 hover:bg-white/10 rounded-md transition-colors"
-          title="Collapse"
-        >
-          <ChevronLeft className="w-4 h-4" />
-        </button>
-      </div>
 
-      {/* Section tabs */}
-      <div className="flex gap-2 p-3">
-        <button
-          onClick={() => setActive("curriculum")}
-          className={`seg ${active === "curriculum" ? "seg-active" : ""}`}
-        >
-          Curriculum
-        </button>
-        <button
-          onClick={() => setActive("practice")}
-          className={`seg ${active === "practice" ? "seg-active" : ""}`}
-        >
-          Practice
-        </button>
-      </div>
+        {/* Section tabs */}
+        <div className="flex gap-2 p-3">
+          <button
+            onClick={() => setActive("curriculum")}
+            className={`seg ${active === "curriculum" ? "seg-active" : ""}`}
+          >
+            Curriculum
+          </button>
+          <button
+            onClick={() => setActive("practice")}
+            className={`seg ${active === "practice" ? "seg-active" : ""}`}
+          >
+            Practice
+          </button>
+        </div>
 
-      {/* Content */}
-      <div className="px-3 pb-3 overflow-y-auto flex-1">
-        {active === "curriculum" && (
-          <div className="panel-card">
-            <div className="panel-title">Modules</div>
-            <div className="space-y-2">
-              {modules.map((m) => {
-                const locked = m.status === "locked";
-                const activeRow = pathname === m.href;
-                return (
-                  <Link
-                    key={m.id}
-                    href={locked ? "#" : `${m.href}${userParam}`}
-                    onClick={(e) => locked && e.preventDefault()}
-                    className={`row ${activeRow ? "row-active" : ""} ${
-                      locked ? "row-locked" : ""
-                    }`}
-                  >
-                    <div className="row-title">{m.title}</div>
-                    <div className="row-sub">{m.subtitle}</div>
-                    <div className="row-meta">{m.duration}</div>
-                    {"progress" in m && m.progress !== undefined && (
-                      <div className="row-bar">
-                        <div
-                          className="row-bar-fill"
-                          style={{ width: `${m.progress}%` }}
-                        />
-                      </div>
-                    )}
-                  </Link>
-                );
-              })}
+        {/* Content */}
+        <div className="px-4 pb-3 overflow-y-auto flex-1">
+          {active === "curriculum" && (
+            <div className="panel-card">
+              <div className="panel-title">Modules</div>
+              <div className="space-y-2">
+                {modules.map((m) => {
+                  const locked = m.status === "locked";
+                  const activeRow = pathname === m.href;
+                  return (
+                    <Link
+                      key={m.id}
+                      href={locked ? "#" : `${m.href}${userParam}`}
+                      onClick={(e) => locked && e.preventDefault()}
+                      className={`row ${activeRow ? "row-active" : ""} ${
+                        locked ? "row-locked" : ""
+                      }`}
+                    >
+                      <div className="row-title">{m.title}</div>
+                      <div className="row-sub">{m.subtitle}</div>
+                      <div className="row-meta">{m.duration}</div>
+                      {"progress" in m && m.progress !== undefined && (
+                        <div className="row-bar">
+                          <div
+                            className="row-bar-fill"
+                            style={{ width: `${m.progress}%` }}
+                          />
+                        </div>
+                      )}
+                    </Link>
+                  );
+                })}
+              </div>
             </div>
-          </div>
-        )}
+          )}
 
-        {active === "practice" && (
-          <div className="panel-card">
-            <div className="panel-title">Game</div>
-            <Link href={`/practice${userParam}`} className="row row-cta">
-              <div className="row-title">Enter Table</div>
-              <div className="row-sub">3-handed GTO practice</div>
-            </Link>
+          {active === "practice" && (
+            <div className="panel-card">
+              <div className="panel-title">Game</div>
+              <Link href={`/practice${userParam}`} className="row row-cta">
+                <div className="row-title">Enter Table</div>
+                <div className="row-sub">3-handed GTO practice</div>
+              </Link>
 
-            <div className="row row-disabled">
-              <div className="row-title">Tournaments</div>
-              <div className="row-sub">Coming soon</div>
+              <div className="row row-disabled">
+                <div className="row-title">Tournaments</div>
+                <div className="row-sub">Coming soon</div>
+              </div>
+
+              <div className="row row-disabled">
+                <div className="row-title">Play with Friends</div>
+                <div className="row-sub">Coming soon</div>
+              </div>
             </div>
-
-            <div className="row row-disabled">
-              <div className="row-title">Play with Friends</div>
-              <div className="row-sub">Coming soon</div>
-            </div>
-          </div>
-        )}
+          )}
+        </div>
       </div>
-    </div>
     </>
   );
 }
