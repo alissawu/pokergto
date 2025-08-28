@@ -317,12 +317,12 @@ export default function PracticeGame({
             }
           }
 
-          // If somehow we didn't pick an action, use the highest EV one
-          if (!action) {
+          // if no action picked use highest EV one
+          if (!action && gtoStrategy.length > 0) {
             action = gtoStrategy[0].action;
           }
         } else {
-          // Fallback if no GTO strategy
+          // fallback if no GTO strategy
           console.warn(
             `No GTO strategy for ${currentBot.name}, using fallback`
           );
