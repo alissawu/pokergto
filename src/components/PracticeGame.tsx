@@ -453,28 +453,37 @@ export default function PracticeGame({
       // Check if this is actually a GTO play
       const playerAction = evBreakdown.find((a) => a.action === action);
       const isOptimalPlay = playerAction?.isOptimal || false;
-      const hasPositiveFreq = playerAction && playerAction.gtoFrequency > 5; // At least 5% frequency to be considered GTO
-      const isGTOPlay = isOptimalPlay || hasPositiveFreq;
+      
+      // A play is only "good" if:
+      // 1. It's the optimal play (highest EV), OR
+      // 2. It has meaningful frequency (>10%) AND reasonable EV (not terrible)
+      const hasGoodFreq = playerAction && playerAction.gtoFrequency >= 10;
+      const hasReasonableEV = playerAction && playerAction.ev >= -1; // Not losing more than 1BB
+      const isGTOPlay = isOptimalPlay || (hasGoodFreq && hasReasonableEV && playerAction.ev > (optimalAction.ev - 2));
 
       const feedback: DecisionFeedback = {
         action,
         isGTO: isGTOPlay,
         expectedValue: playerAction?.ev || 0,
         explanation: isOptimalPlay
-          ? `Perfect! This is the highest EV play with ${playerAction.ev.toFixed(
+          ? `Perfect! This is the highest EV play: ${playerAction.ev.toFixed(
               2
-            )} BB expected value (played ${
-              playerAction.gtoFrequency
-            }% in GTO strategy)`
-          : hasPositiveFreq
-          ? `Good mixed strategy play! EV: ${playerAction.ev.toFixed(
+            )} BB (GTO plays this ${playerAction.gtoFrequency}% of the time)`
+          : isGTOPlay
+          ? `Acceptable mixed strategy play. EV: ${playerAction.ev.toFixed(
               2
             )} BB (GTO frequency: ${playerAction.gtoFrequency}%)`
+          : playerAction?.gtoFrequency > 50
+          ? `This is a high-frequency play (${playerAction.gtoFrequency}%), but the EV is poor: ${
+              playerAction.ev.toFixed(2)
+            } BB. The optimal play is ${optimalAction.action} with EV: ${
+              optimalAction.ev.toFixed(2)
+            } BB`
           : `Suboptimal. The best play is ${
               optimalAction.action
-            } with EV of ${optimalAction.ev.toFixed(
+            } with EV: ${optimalAction.ev.toFixed(
               2
-            )} BB. Your ${action} has EV of ${
+            )} BB. Your ${action} has EV: ${
               playerAction?.ev.toFixed(2) || "0.00"
             } BB`,
         evBreakdown,
@@ -557,11 +566,18 @@ export default function PracticeGame({
           isOptimal: false, // Will be set below
         }));
 
-        // Mark the highest EV action as optimal
+        // Mark ONLY the highest EV action as optimal (not all with similar values)
         const maxEV = Math.max(...breakdown.map((b) => b.ev));
         breakdown.forEach((item) => {
-          item.isOptimal = Math.abs(item.ev - maxEV) < 0.001;
+          item.isOptimal = false; // Reset all
         });
+        // Find the action with truly highest EV
+        const bestAction = breakdown.reduce((best, current) => 
+          current.ev > best.ev ? current : best
+        );
+        if (bestAction) {
+          bestAction.isOptimal = true;
+        }
 
         // Ensure fold is always an option with correct EV
         if (!breakdown.find((b) => b.action === "fold")) {
@@ -617,10 +633,11 @@ export default function PracticeGame({
       else if (card1Rank >= 5) baseEquity = 0.45; // 55-77
       else baseEquity = 0.4; // 22-44
     } else if (hasAce) {
-      // Ace-high hands
+      // Ace-high hands - more granular for accuracy
       if (lowCard >= 10) baseEquity = isSuited ? 0.5 : 0.45; // AT+
       else if (lowCard >= 7) baseEquity = isSuited ? 0.4 : 0.35; // A7-A9
-      else baseEquity = isSuited ? 0.35 : 0.3; // A2-A6
+      else if (lowCard >= 5) baseEquity = isSuited ? 0.33 : 0.28; // A5-A6
+      else baseEquity = isSuited ? 0.3 : 0.25; // A2-A4 (includes A3o)
     } else if (hasKing && lowCard >= 10) {
       // King-high broadway
       baseEquity = isSuited ? 0.42 : 0.37;
@@ -645,10 +662,21 @@ export default function PracticeGame({
 
     // Calculate fold EV - we lose what we've already invested
     const foldEV = -hero.totalInvested;
+    
+    // Determine fold frequency based on hand strength
+    let foldFreq = 10; // Default
+    if (toCall > 0) { // Facing a bet
+      if (baseEquity < 0.25) foldFreq = 80; // Very weak hands fold a lot
+      else if (baseEquity < 0.35) foldFreq = 60; // Weak hands fold often  
+      else if (baseEquity < 0.45) foldFreq = 40; // Medium hands sometimes fold
+      else if (baseEquity < 0.55) foldFreq = 20; // Good hands rarely fold
+      else foldFreq = 5; // Strong hands almost never fold
+    }
+    
     breakdown.push({
       action: "fold",
       ev: foldEV,
-      gtoFrequency: 10,
+      gtoFrequency: foldFreq,
       isOptimal: false,
     });
 
@@ -662,9 +690,18 @@ export default function PracticeGame({
       const potOdds = toCall / (pot + toCall);
       let callFreq = 30;
 
-      if (equityDecimal > potOdds) {
-        callFreq = 50 + Math.round((equityDecimal - potOdds) * 100);
-      } else if (equityDecimal < potOdds * 0.8) {
+      // More realistic call frequencies
+      if (equityDecimal > potOdds * 1.5) {
+        // Strong equity advantage - call often
+        callFreq = 60;
+      } else if (equityDecimal > potOdds) {
+        // Positive equity - call sometimes
+        callFreq = 40;
+      } else if (equityDecimal > potOdds * 0.7) {
+        // Close to break even - call occasionally
+        callFreq = 20;
+      } else {
+        // Poor equity - rarely call
         callFreq = 5;
       }
 
@@ -726,16 +763,28 @@ export default function PracticeGame({
 
       let raiseFreq = 15;
 
+      // More realistic raise frequencies based on hand strength
       if (baseEquity > 0.6) {
-        raiseFreq = 60 + Math.round(raiseEV * 10);
-      } else if (baseEquity > 0.45) {
-        raiseFreq = 35 + Math.round(raiseEV * 5);
+        // Premium hands raise a lot
+        raiseFreq = 70;
+      } else if (baseEquity > 0.5) {
+        // Strong hands raise often
+        raiseFreq = 40;
+      } else if (baseEquity > 0.4) {
+        // Good hands raise sometimes
+        raiseFreq = 20;
       } else if (baseEquity > 0.35) {
-        raiseFreq = 20 + Math.round(raiseEV * 3);
-      } else if (raiseEV > 0.5) {
+        // Decent hands occasionally bluff
         raiseFreq = 10;
       } else {
-        raiseFreq = 3;
+        // Weak hands rarely bluff (A3o falls here)
+        raiseFreq = 5;
+      }
+      
+      // Adjust based on EV
+      if (raiseEV < -1) {
+        // Very negative EV - reduce frequency
+        raiseFreq = Math.max(0, raiseFreq - 10);
       }
 
       raiseFreq = Math.max(0, Math.min(80, raiseFreq));
@@ -748,16 +797,16 @@ export default function PracticeGame({
       });
     }
 
-    // Mark only the single highest EV action as optimal
-    const maxEV = Math.max(...breakdown.map((b) => b.ev));
+    // Mark ONLY the single highest EV action as optimal
     breakdown.forEach((item) => {
       item.isOptimal = false; // Reset all first
     });
-    // Find and mark only the highest EV action
-    const bestAction = breakdown.find(
-      (item) => Math.abs(item.ev - maxEV) < 0.001
-    );
-    if (bestAction) {
+    
+    // Find the action with truly highest EV (not just close to max)
+    if (breakdown.length > 0) {
+      const bestAction = breakdown.reduce((best, current) => 
+        current.ev > best.ev ? current : best
+      );
       bestAction.isOptimal = true;
     }
 
@@ -1238,8 +1287,8 @@ export default function PracticeGame({
                         ))}
                       </div>
                       <div className="text-xs text-gray-500 mt-2">
-                        <strong>Note:</strong> "Highest EV" = best single
-                        action. "Freq" = how often GTO mixes this action.
+                        <strong>Note:</strong> "Highest EV" = the single best action by expected value. 
+                        "Freq" = how often GTO strategy would choose this action (mixing frequency).
                       </div>
                     </div>
                   </div>
