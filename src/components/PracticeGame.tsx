@@ -91,7 +91,7 @@ export default function PracticeGame({
   const startNewHand = useCallback(() => {
     // Using 15BB stacks for perfect Nash equilibrium play
     const STACK_SIZE = 15; // 15 big blinds
-    
+
     const initialPlayers: Player[] = [
       {
         id: "btn",
@@ -430,13 +430,17 @@ export default function PracticeGame({
       // Check if this is actually a GTO play
       const playerAction = evBreakdown.find((a) => a.action === action);
       const isOptimalPlay = playerAction?.isOptimal || false;
-      
+
       // A play is only "good" if:
       // 1. It's the optimal play (highest EV), OR
       // 2. It has meaningful frequency (>10%) AND reasonable EV (not terrible)
       const hasGoodFreq = playerAction && playerAction.gtoFrequency >= 10;
       const hasReasonableEV = playerAction && playerAction.ev >= -1; // Not losing more than 1BB
-      const isGTOPlay = isOptimalPlay || (hasGoodFreq && hasReasonableEV && playerAction.ev > (optimalAction.ev - 2));
+      const isGTOPlay =
+        isOptimalPlay ||
+        (hasGoodFreq &&
+          hasReasonableEV &&
+          playerAction.ev > optimalAction.ev - 2);
 
       const feedback: DecisionFeedback = {
         action,
@@ -447,9 +451,7 @@ export default function PracticeGame({
               2
             )} BB`
           : isGTOPlay
-          ? `Acceptable play. EV: ${playerAction.ev.toFixed(
-              2
-            )} BB`
+          ? `Acceptable play. EV: ${playerAction.ev.toFixed(2)} BB`
           : `Suboptimal. The best play is ${
               optimalAction.action
             } with EV: ${optimalAction.ev.toFixed(
@@ -530,7 +532,7 @@ export default function PracticeGame({
     if (nashDecisions.length > 0) {
       // Convert Nash decisions to our format
       const breakdown = nashDecisions.map((decision) => ({
-        action: decision.action === 'push' ? 'all-in' : decision.action,
+        action: decision.action,
         ev: decision.ev,
         gtoFrequency: Math.round(decision.frequency),
         isOptimal: false,
@@ -538,7 +540,9 @@ export default function PracticeGame({
 
       // Mark the highest EV action as optimal
       const maxEV = Math.max(...breakdown.map((b) => b.ev));
-      const bestAction = breakdown.find((item) => Math.abs(item.ev - maxEV) < 0.001);
+      const bestAction = breakdown.find(
+        (item) => Math.abs(item.ev - maxEV) < 0.001
+      );
       if (bestAction) {
         bestAction.isOptimal = true;
       }
@@ -564,7 +568,7 @@ export default function PracticeGame({
         ev: -hero.totalInvested,
         gtoFrequency: 100,
         isOptimal: true,
-      }
+      },
     ];
   };
 
@@ -638,17 +642,18 @@ export default function PracticeGame({
 
     // Calculate fold EV - we lose what we've already invested
     const foldEV = -hero.totalInvested;
-    
+
     // Determine fold frequency based on hand strength
     let foldFreq = 10; // Default
-    if (toCall > 0) { // Facing a bet
+    if (toCall > 0) {
+      // Facing a bet
       if (baseEquity < 0.25) foldFreq = 80; // Very weak hands fold a lot
-      else if (baseEquity < 0.35) foldFreq = 60; // Weak hands fold often  
+      else if (baseEquity < 0.35) foldFreq = 60; // Weak hands fold often
       else if (baseEquity < 0.45) foldFreq = 40; // Medium hands sometimes fold
       else if (baseEquity < 0.55) foldFreq = 20; // Good hands rarely fold
       else foldFreq = 5; // Strong hands almost never fold
     }
-    
+
     breakdown.push({
       action: "fold",
       ev: foldEV,
@@ -660,7 +665,7 @@ export default function PracticeGame({
     if (toCall > 0) {
       // EV = (equity * total pot after calling) - amount to call
       const totalPotAfterCall = pot + toCall;
-      
+
       // Reduce realized equity for trash hands and when out of position
       let realizedEquity = equityDecimal;
       if (hero.isSB) {
@@ -669,7 +674,7 @@ export default function PracticeGame({
       if (baseEquity < 0.3) {
         realizedEquity *= 0.85; // Trash hands don't realize full equity
       }
-      
+
       const callEV = realizedEquity * totalPotAfterCall - toCall;
 
       // Adjust frequency based on hand strength and pot odds
@@ -727,15 +732,19 @@ export default function PracticeGame({
     if (hero.stack >= raiseCost && raiseCost > 0) {
       // Calculate fold equity more realistically
       // Key factors: raise size, hand strength, position, game state
-      
+
       // Check how many players have already folded (affects fold equity)
-      const foldedPlayers = state.players.filter((p: Player) => p.hasFolded).length;
-      const activePlayers = state.players.filter((p: Player) => !p.hasFolded && !p.isHero).length;
-      
+      const foldedPlayers = state.players.filter(
+        (p: Player) => p.hasFolded
+      ).length;
+      const activePlayers = state.players.filter(
+        (p: Player) => !p.hasFolded && !p.isHero
+      ).length;
+
       // Base fold equity depends on raise size to pot
       const raiseToPotRatio = raiseCost / pot;
       let foldEquity = 0;
-      
+
       if (raiseToPotRatio > 2) {
         // Large overbet - some fold equity
         foldEquity = 0.4;
@@ -749,43 +758,44 @@ export default function PracticeGame({
         // Min-raise or small bet - almost no fold equity
         foldEquity = 0.05;
       }
-      
+
       // Adjust based on situation
       if (foldedPlayers > 0 && activePlayers === 1) {
         // Heads-up after someone folded - BB defends wide
-        foldEquity *= 0.5; 
+        foldEquity *= 0.5;
       }
-      
+
       // If we're raising a very small amount (like min-raising), BB calls with any two cards
       const potOddsForVillain = raiseCost / (pot + raiseCost * 2);
       if (potOddsForVillain < 0.25) {
         // Villain getting better than 3:1, calls very wide
         foldEquity = Math.min(foldEquity, 0.1);
       }
-      
+
       // Trash hands get less credit (villain knows we should have folded)
       if (baseEquity < 0.25) {
         foldEquity *= 0.5;
       }
-      
+
       foldEquity = Math.max(0.02, Math.min(0.5, foldEquity));
 
       // Calculate raise EV more accurately
       // When called, we need to win at showdown
       const futurePot = pot + raiseCost * 2;
-      
+
       // Account for being out of position (SB) - reduces EV
       const positionPenalty = hero.isSB ? 0.9 : 1.0;
-      
+
       // For trash hands, reduce realized equity (we won't play well postflop)
       let realizedEquity = equityDecimal;
       if (baseEquity < 0.3) {
         realizedEquity *= 0.8; // Trash hands realize less equity
       }
-      
-      const raiseEV = 
-        foldEquity * pot + 
-        (1 - foldEquity) * (realizedEquity * positionPenalty * futurePot - raiseCost);
+
+      const raiseEV =
+        foldEquity * pot +
+        (1 - foldEquity) *
+          (realizedEquity * positionPenalty * futurePot - raiseCost);
 
       let raiseFreq = 15;
 
@@ -806,7 +816,7 @@ export default function PracticeGame({
         // Weak hands rarely bluff (A3o falls here)
         raiseFreq = 5;
       }
-      
+
       // Adjust based on EV
       if (raiseEV < -1) {
         // Very negative EV - reduce frequency
@@ -827,10 +837,10 @@ export default function PracticeGame({
     breakdown.forEach((item) => {
       item.isOptimal = false; // Reset all first
     });
-    
+
     // Find the action with truly highest EV (not just close to max)
     if (breakdown.length > 0) {
-      const bestAction = breakdown.reduce((best, current) => 
+      const bestAction = breakdown.reduce((best, current) =>
         current.ev > best.ev ? current : best
       );
       bestAction.isOptimal = true;
@@ -1307,7 +1317,8 @@ export default function PracticeGame({
                         ))}
                       </div>
                       <div className="text-xs text-gray-500 mt-2">
-                        <strong>Note:</strong> "Highest EV" = the single best action by expected value.
+                        <strong>Note:</strong> "Highest EV" = the single best
+                        action by expected value.
                       </div>
                     </div>
                   </div>

@@ -26,11 +26,12 @@ export interface NashDecision {
 export class NashEquilibriumSolver {
   /**
    * Get the Nash equilibrium decision for current game state
+   * ALWAYS returns all 4 actions with their EVs
    */
   public getDecision(state: GameState, playerId: string): NashDecision[] {
     const player = state.players.find(p => p.id === playerId);
     if (!player || !player.cards || player.cards.length !== 2) {
-      return [];
+      return this.getDefaultDecisions(player);
     }
 
     // Convert cards to hand notation
@@ -43,38 +44,62 @@ export class NashEquilibriumSolver {
     // Get Nash action from precomputed charts
     const nashAction = getNashAction(hand, position, situation);
     
-    // Calculate EVs
-    const decisions: NashDecision[] = [];
+    // Calculate EVs for ALL actions
     const pot = state.pot;
     const toCall = state.currentBet - player.currentBet;
+    const stack = player.stack;
     
-    // Push/All-in decision
-    if (nashAction.push > 0 || situation === 'open') {
-      const pushEV = this.calculatePushEV(state, player, nashAction.push);
-      decisions.push({
-        action: toCall > 0 ? 'call' : 'push', // If facing a push, we call (all-in)
-        frequency: nashAction.push,
-        ev: pushEV,
-        isGTO: nashAction.push > 50, // Majority strategy is GTO
-        explanation: `Nash: Push ${nashAction.push}% of the time with ${hand}`
-      });
-    }
-    
-    // Fold decision
-    if (nashAction.fold > 0) {
-      decisions.push({
+    // Always return all 4 actions
+    const decisions: NashDecision[] = [
+      {
         action: 'fold',
-        frequency: nashAction.fold,
+        frequency: nashAction.fold || 0,
         ev: -player.totalInvested,
         isGTO: nashAction.fold > 50,
-        explanation: `Nash: Fold ${nashAction.fold}% of the time with ${hand}`
-      });
-    }
+        explanation: `Fold frequency: ${nashAction.fold}%`
+      },
+      {
+        action: 'call',
+        frequency: nashAction.call || 0,
+        ev: this.calculateCallEV(state, player, nashAction.call || 0),
+        isGTO: nashAction.call > 30,
+        explanation: `Call/limp frequency: ${nashAction.call}%`
+      },
+      {
+        action: 'raise',
+        frequency: nashAction.minraise || 0,
+        ev: this.calculateRaiseEV(state, player, nashAction.minraise || 0),
+        isGTO: nashAction.minraise > 30,
+        explanation: `Min-raise frequency: ${nashAction.minraise}%`
+      },
+      {
+        action: 'all-in',
+        frequency: nashAction.allin || 0,
+        ev: this.calculateAllinEV(state, player, nashAction.allin || 0),
+        isGTO: nashAction.allin > 30,
+        explanation: `All-in frequency: ${nashAction.allin}%`
+      }
+    ];
     
-    // Sort by frequency (most common action first)
-    decisions.sort((a, b) => b.frequency - a.frequency);
+    // Mark the action with highest frequency as optimal
+    const maxFreq = Math.max(...decisions.map(d => d.frequency));
+    decisions.forEach(d => {
+      if (d.frequency === maxFreq && maxFreq > 0) {
+        d.isGTO = true;
+      }
+    });
     
     return decisions;
+  }
+  
+  private getDefaultDecisions(player: Player | undefined): NashDecision[] {
+    const invested = player?.totalInvested || 0;
+    return [
+      { action: 'fold', frequency: 100, ev: -invested, isGTO: true, explanation: 'Default: fold' },
+      { action: 'call', frequency: 0, ev: -invested - 1, isGTO: false, explanation: 'Default: no call' },
+      { action: 'raise', frequency: 0, ev: -invested - 2, isGTO: false, explanation: 'Default: no raise' },
+      { action: 'all-in', frequency: 0, ev: -invested - 15, isGTO: false, explanation: 'Default: no all-in' }
+    ];
   }
   
   /**
@@ -140,31 +165,109 @@ export class NashEquilibriumSolver {
   }
   
   /**
+   * Calculate EV for calling/limping
+   */
+  private calculateCallEV(state: GameState, player: Player, frequency: number): number {
+    const pot = state.pot;
+    const toCall = Math.min(state.currentBet - player.currentBet, player.stack);
+    
+    // If Nash says never call (0%), the EV should be negative
+    if (frequency === 0) {
+      return -toCall - 2; // Worse than folding since we lose more
+    }
+    
+    // For 15BB play, use frequency to scale EV
+    // Higher frequency = stronger spot to call
+    // At 100% frequency, this is a slam dunk call
+    // At 50% frequency, this is breakeven to slightly positive
+    // Below 30% frequency, this is negative EV
+    
+    if (frequency >= 70) {
+      // Strong calling spot (like AK vs push)
+      return pot * 0.4 - toCall * 0.3;
+    } else if (frequency >= 50) {
+      // Decent calling spot  
+      return pot * 0.25 - toCall * 0.5;
+    } else if (frequency >= 30) {
+      // Marginal calling spot
+      return pot * 0.1 - toCall * 0.7;
+    } else {
+      // Bad calling spot (but Nash says to do it sometimes for balance)
+      return -toCall * 0.8;
+    }
+  }
+  
+  /**
+   * Calculate EV for min-raising
+   */
+  private calculateRaiseEV(state: GameState, player: Player, frequency: number): number {
+    const pot = state.pot;
+    const minRaise = state.currentBet * 2;
+    const raiseAmount = Math.min(minRaise - player.currentBet, player.stack);
+    
+    if (frequency === 0) {
+      return -raiseAmount - 3; // Worse than calling, much worse than folding
+    }
+    
+    // Raising should generally have better EV than calling when it's in our range
+    // because it has fold equity + initiative
+    
+    if (frequency >= 50) {
+      // Strong raising spot (premium hands)
+      return pot * 0.6 + raiseAmount * 0.2; // Win pot often + some extra
+    } else if (frequency >= 30) {
+      // Decent raising spot
+      return pot * 0.4; // Often win the pot
+    } else if (frequency >= 15) {
+      // Marginal raising spot (semi-bluffs)
+      return pot * 0.2 - raiseAmount * 0.1;
+    } else if (frequency >= 5) {
+      // Rare bluff
+      return pot * 0.1 - raiseAmount * 0.3;
+    } else {
+      // Very bad spot to raise
+      return -raiseAmount * 0.7;
+    }
+  }
+  
+  /**
    * Calculate EV for pushing all-in
    */
-  private calculatePushEV(state: GameState, player: Player, pushFrequency: number): number {
+  private calculateAllinEV(state: GameState, player: Player, frequency: number): number {
     const pot = state.pot;
     const stack = player.stack;
     
-    // If Nash says never push (0%), the EV is terrible
-    if (pushFrequency === 0) {
-      return -stack; // You'll lose your entire stack
+    if (frequency === 0) {
+      return -stack; // Terrible - lose entire stack
     }
     
-    // EV based on Nash push frequency
-    // Higher frequency = stronger hand = better EV
-    if (pushFrequency >= 80) {
-      return pot * 0.6; // Premium hands
-    } else if (pushFrequency >= 50) {
-      return pot * 0.3; // Good hands
-    } else if (pushFrequency >= 20) {
-      return pot * 0.1; // Marginal pushes
-    } else if (pushFrequency >= 5) {
-      return -stack * 0.2; // Rare bluffs
+    // All-in has maximum fold equity at 15BB
+    // Higher frequency = stronger range but less fold equity (opponents know we're strong)
+    
+    if (frequency >= 80) {
+      // Premium hands (AA, KK, AK)
+      return pot * 0.8 + stack * 0.3; // Very often win big
+    } else if (frequency >= 60) {
+      // Strong hands (QQ, JJ, AQ)
+      return pot * 0.7 + stack * 0.1;
+    } else if (frequency >= 40) {
+      // Good hands (TT, AJ, KQ)
+      return pot * 0.6;
+    } else if (frequency >= 20) {
+      // Decent hands (99, AT, KJ)
+      return pot * 0.4 - stack * 0.05;
+    } else if (frequency >= 10) {
+      // Marginal shoves (88, A9, KT)
+      return pot * 0.3 - stack * 0.1;
+    } else if (frequency >= 5) {
+      // Bluffs/steal attempts
+      return pot * 0.2 - stack * 0.2;
     } else {
-      return -stack * 0.5; // Very bad pushes
+      // Very bad (should never do this)
+      return -stack * 0.6;
     }
   }
+  
   
   /**
    * Get action recommendation based on Nash
@@ -174,10 +277,12 @@ export class NashEquilibriumSolver {
     if (decisions.length === 0) return 'fold';
     
     // Get the highest frequency action (most common in Nash)
-    const bestDecision = decisions[0];
+    const bestDecision = decisions.reduce((best, current) => 
+      current.frequency > best.frequency ? current : best
+    );
     
     // Convert to game action
-    if (bestDecision.action === 'push') {
+    if (bestDecision.action === 'all-in') {
       return 'all-in';
     } else if (bestDecision.action === 'call' && state.currentBet > 0) {
       // Check if this is actually an all-in call
@@ -207,7 +312,7 @@ export class NashEquilibriumSolver {
       cumulative += decision.frequency;
       if (random <= cumulative) {
         // Convert to game action
-        if (decision.action === 'push') {
+        if (decision.action === 'all-in') {
           return 'all-in';
         } else if (decision.action === 'call') {
           const player = state.players.find(p => p.id === playerId);

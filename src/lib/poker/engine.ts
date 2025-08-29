@@ -100,28 +100,36 @@ export class PokerGame {
       isAllIn: false,
       position: i,
       cards: [] as [],
-      isDealer: i === 0,
-      isSB: i === 1 % players.length,
-      isBB: i === 2 % players.length,
+      // Preserve position flags if already set, otherwise assign based on index
+      isDealer: p.isDealer !== undefined ? p.isDealer : i === 0,
+      isSB: p.isSB !== undefined ? p.isSB : i === (1 % players.length),
+      isBB: p.isBB !== undefined ? p.isBB : i === (2 % players.length),
     }));
 
-    // Post blinds - for 3 players: dealer=0, SB=1, BB=2
-    const sbIndex = 1 % players.length;
-    const bbIndex = 2 % players.length;
-    gamePlayers[sbIndex].currentBet = blinds.sb;
-    gamePlayers[sbIndex].stack -= blinds.sb;
-    gamePlayers[sbIndex].totalInvested = blinds.sb;
-    gamePlayers[bbIndex].currentBet = blinds.bb;
-    gamePlayers[bbIndex].stack -= blinds.bb;
-    gamePlayers[bbIndex].totalInvested = blinds.bb;
+    // Post blinds - find players by their position flags
+    const sbPlayer = gamePlayers.find(p => p.isSB);
+    const bbPlayer = gamePlayers.find(p => p.isBB);
+    
+    if (sbPlayer) {
+      sbPlayer.currentBet = blinds.sb;
+      sbPlayer.stack -= blinds.sb;
+      sbPlayer.totalInvested = blinds.sb;
+    }
+    
+    if (bbPlayer) {
+      bbPlayer.currentBet = blinds.bb;
+      bbPlayer.stack -= blinds.bb;
+      bbPlayer.totalInvested = blinds.bb;
+    }
 
     // In 3-player game preflop: After blinds are posted, BTN acts first (UTG position)
     // Action order: BTN → SB → BB (BB has option to check/raise even if just called)
     const dealerIndex = gamePlayers.findIndex((p) => p.isDealer);
+    const bbPlayerIndex = gamePlayers.findIndex((p) => p.isBB);
     const firstToAct =
       players.length === 3
         ? gamePlayers[dealerIndex].id
-        : gamePlayers[(bbIndex + 1) % players.length].id;
+        : gamePlayers[(bbPlayerIndex + 1) % players.length].id;
 
     this.state = {
       players: gamePlayers,
@@ -181,6 +189,7 @@ export class PokerGame {
       actions.push("check");
       if (player.stack > 0) {
         actions.push("bet");
+        actions.push("all-in"); // Can always go all-in when you have chips
       }
     } else {
       actions.push("fold");
@@ -188,9 +197,10 @@ export class PokerGame {
         actions.push("call");
         if (player.stack > toCall) {
           actions.push("raise");
+          actions.push("all-in"); // Can always go all-in when you have chips
         }
-      }
-      if (player.stack < toCall && player.stack > 0) {
+      } else if (player.stack > 0) {
+        // Stack is less than toCall, so calling = all-in
         actions.push("all-in");
       }
     }

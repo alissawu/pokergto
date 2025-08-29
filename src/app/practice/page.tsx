@@ -9,7 +9,7 @@ import PracticeGame from "@/components/PracticeGame";
 export default function Practice() {
   const searchParams = useSearchParams();
   const [userName, setUserName] = useState<string | null>(null);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
 
   useEffect(() => {
     // Get name from URL params or localStorage

@@ -8,7 +8,7 @@ import TopBar from "@/components/TopBar";
 export default function Module1() {
   const searchParams = useSearchParams();
   const [userName, setUserName] = useState<string | null>(null);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
 
   useEffect(() => {
     const urlName = searchParams.get("name");
